@@ -2,6 +2,23 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [未发布]
+
+### 变更（内部重构，无行为差异）
+
+- **渲染层抽出「输出写法」注册表**：`sqlgen.py` 的 `_render()` 不再于中段用
+  `if opts.fmt == 'insert'` 分支，改为 `RENDERERS = {'union': …, 'insert': …}` 分派；
+  两种写法共用的头注释收进 `_header_comments()`。结构与 `dialects.DIALECTS` 同构 ——
+  加一种写法 = 加一个函数 + 注册一行，不必再进 `_render` 中段改分支。
+  模块导入时校验 `RENDERERS` 与 `FORMATS` 不漂移。
+- **已验证零行为差异**：186 条单测通过；60 条端到端用例的日志与产物**逐字节一致**；
+  另有 192 条（4 输入 × 4 方言 × 3 输出形式 × 4 选项集）新旧实现对撞，
+  `rc` / `stdout` / `stderr` / 产物字节全部一致。
+- **明确边界**：`--format` 只表示**同一种 SQL 文本的不同写法**。换**输出载体**
+  （json/yaml）或换**产品形态**（ddl/orm）属于新能力，其渲染器入参协议不同
+  （`ddl`/`orm` 还需要列类型与约束的来源），不并入 `RENDERERS`、不污染 `--format` 语义。
+  等出现第三种写法时再拆出 `renderers/`，且届时按**载体**建目录而非按写法平铺。
+
 ## [0.3.2] - 2026-09-25
 
 一次跨 SQL Server / MySQL / PostgreSQL 的端到端实测（51,290 行大表 + 多组边界夹具）暴露的问题。
