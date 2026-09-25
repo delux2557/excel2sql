@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import datetime
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, List, Optional, Sequence
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from .dialects import Dialect
 from .headers import is_blank
@@ -21,6 +22,15 @@ WRAPS = ('cte', 'plain')
 
 # 超过该行数仍用 UNION ALL 会明显拖慢解析，默认建议 insert
 UNION_ROW_WARN = 2000
+
+# 纯数字文本（--infer-types 用）
+_INT_RE = re.compile(r'[+-]?\d+')
+_FLOAT_RE = re.compile(r'[+-]?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?')
+
+# 「按字符串输出」的原因分档 —— 写进产物头注释，让"用户要求的"与"工具被迫的"可区分
+REASON_ALL_STRING = '用户指定 --all-string'
+REASON_MIXED = '同列混有数字/日期与文本，整列统一为字符串'
+REASON_TEXT = '源数据是文本（CSV 无类型信息）'
 
 
 class SqlGenError(Exception):
@@ -35,6 +45,7 @@ class SqlOptions:
     wrap: str = 'cte'               # cte | plain（仅 union 生效）
     empty_as_null: bool = False     # 空字符串视为 NULL
     all_string: bool = False        # 所有列强制按字符串输出
+    infer_types: bool = False       # CSV 等无类型信息：整列是数字时按数字输出
     batch_size: int = 500           # insert 模式每批行数
 
     def __post_init__(self) -> None:
@@ -66,6 +77,93 @@ def infer_column_types(header: Sequence[object], rows: Sequence[Sequence[object]
                     continue                       # 会被当 NULL，不影响列类型
                 force[i] = True
     return force
+
+
+def _as_number(text: str):
+    """把纯数字文本转成 int/float；不是数字则返回 None。
+
+    **带前导零的整数（'007'）刻意不转** —— 转成 7 会丢信息，
+    而这类列本来就更可能是编号而不是数量。
+    """
+    t = text.strip()
+    if not t:
+        return None
+    if _INT_RE.fullmatch(t):
+        digits = t.lstrip('+-')
+        if len(digits) > 1 and digits[0] == '0':
+            return None                            # '007' / '000123' 保持文本
+        return int(t)
+    if _FLOAT_RE.fullmatch(t):
+        try:
+            return float(t)
+        except ValueError:
+            return None
+    return None
+
+
+def coerce_numeric_columns(rows: Sequence[Sequence[object]]) -> List[List[object]]:
+    """把「整列都是数字文本」的列换成真正的数字（--infer-types 的实现）。
+
+    为什么需要：CSV 没有类型信息，读出来一律是 `str`，于是 infer_column_types()
+    会把**所有列**都字符串化，`union` 产物随之彻底丢类型（2026-09-25 实测：
+    SQL Server 落成 `nvarchar`、PG 落成 `text`、`SUM()` 三库全都报错）。
+
+    保守起见只做**整列可解析**才转换：只要有一格不是数字（含 NaN/inf/前导零）
+    就整列保持文本，绝不逐格猜。该列的空白单元格会一并转成 `NULL`
+    —— 数字列本来就容不下空字符串。
+    """
+    out = [list(r) for r in rows]
+    ncols = max((len(r) for r in out), default=0)
+    for i in range(ncols):
+        col = [(r[i] if i < len(r) else None) for r in out]
+        idx = [j for j, v in enumerate(col) if not is_blank(v)]
+        if not idx or not all(isinstance(col[j], str) for j in idx):
+            continue                               # 含非文本值 -> 不动
+        nums = [_as_number(col[j]) for j in idx]
+        if any(n is None for n in nums):
+            continue                               # 有一格不像数字 -> 整列不动
+        for j, n in zip(idx, nums):
+            out[j][i] = n
+        for j, v in enumerate(col):                # 空白 -> NULL
+            if is_blank(v):
+                out[j][i] = None
+    return out
+
+
+def forced_groups(header: Sequence[object], rows: Sequence[Sequence[object]],
+                  force: Sequence[bool], all_string: bool) -> List[Tuple[str, List[str]]]:
+    """给「按字符串输出」的列分档，供产物头注释区分原因。
+
+    分档依据是**该列实际观测到的值**，不依赖调用方声明来源：
+    - 用户显式 `--all-string`；
+    - 列里既有文本又有非文本 -> 同列混类型（工具被迫统一）；
+    - 列里的非空值全都是文本 -> 源数据本来就是文本（CSV 的典型特征）。
+    """
+    names = [str(h) for h, f in zip(header, force) if f]
+    if not names:
+        return []
+    if all_string:
+        return [(REASON_ALL_STRING, names)]
+
+    text_like: List[str] = []
+    mixed: List[str] = []
+    for i, (name, f) in enumerate(zip(header, force)):
+        if not f:
+            continue
+        vals = [(r[i] if i < len(r) else None) for r in rows]
+        vals = [v for v in vals
+                if not (v is None or (isinstance(v, str) and v.strip() == ''))]
+        if vals and all(isinstance(v, str) for v in vals):
+            text_like.append(str(name))
+        else:
+            mixed.append(str(name))
+
+    out: List[Tuple[str, List[str]]] = []
+    if mixed:
+        out.append((REASON_MIXED, mixed))
+    if text_like:
+        out.append((REASON_TEXT, text_like))
+    return out
 
 
 def literal(value, force_str: bool, opts: SqlOptions) -> str:
@@ -123,6 +221,8 @@ def prepare(header: Sequence[object], rows: Sequence[Sequence[object]], opts: Sq
     data = [list(r[:ncols]) for r in rows if not all(is_blank(v) for v in list(r)[:ncols])]
     if not data:
         raise SqlGenError('没有有效数据行')
+    if opts.infer_types:
+        data = coerce_numeric_columns(data)
     force = infer_column_types(header, data, opts.all_string, opts.empty_as_null)
     return list(header), data, force
 
@@ -138,12 +238,11 @@ def _render(header: Sequence[object], data: Sequence[Sequence[object]],
             force: Sequence[bool], opts: SqlOptions) -> Iterator[str]:
     dia = opts.dialect
     cols = ', '.join(dia.quote_ident(h) for h in header)
-    forced = [h for h, f in zip(header, force) if f]
 
     yield '-- 由 excel2sql 生成：{} 行 x {} 列\n'.format(len(data), len(header))
     yield '-- 方言：{}   输出格式：{}\n'.format(dia.name, opts.fmt)
-    if forced:
-        yield '-- 混类型列统一为字符串：{}\n'.format(', '.join(str(x) for x in forced))
+    for reason, names in forced_groups(header, data, force, opts.all_string):
+        yield '-- 按字符串输出的列（{}）：{}\n'.format(reason, ', '.join(names))
     yield '-- 提示：内联数据仅供测试/修数，请勿直接用于生产批量导入\n'
 
     if opts.fmt == 'insert':

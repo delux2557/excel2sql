@@ -71,7 +71,13 @@ SQLSERVER = Dialect(
 
 MYSQL = Dialect(
     key='mysql', name='MySQL', ident_open='`', ident_close='`',
-    string_prefix='', concat='func', newline_expr='CHAR(10)',
+    string_prefix='', concat='func',
+    # ★ 必须带 USING：MySQL 里裸 CHAR(10) 返回的是**二进制字符串**，
+    #   CONCAT() 一旦遇到二进制参数，结果也是二进制 ——
+    #   `CREATE TABLE AS SELECT CONCAT('a', CHAR(10), 'b')` 会推出 varbinary 列
+    #   （排序/比较按字节走，字符集为 NULL，不能直接用于生产）。
+    #   实测 2026-09-25：SQL Server / PostgreSQL / Oracle 的三种写法都正常，只有 MySQL 需要改。
+    newline_expr='CHAR(10 USING utf8mb4)',
     backslash_escape=True,
 )
 

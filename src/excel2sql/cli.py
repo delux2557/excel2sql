@@ -126,14 +126,30 @@ def ask_format(default_fmt: str, default_wrap: str) -> Tuple[str, str]:
 
 
 # ------------------------------------------------------------------ 表头
+def _column_all_blank(rows: Sequence[Sequence[object]], idx: int) -> bool:
+    """该列在给出的所有行里是否全为空。"""
+    for r in rows:
+        if idx < len(r) and not is_blank(r[idx]):
+            return False
+    return True
+
+
 def split_header(sheet: Sheet, row_index: int) -> Tuple[Optional[List], List[List]]:
-    """按 1 基行号切出表头与数据，并裁掉右侧多余空列。"""
+    """按 1 基行号切出表头与数据，并裁掉右侧多余空列。
+
+    ★ 只裁「表头为空 **且** 该列数据全空」的尾列。
+      旧实现只看表头是否为空 —— 于是"表头留空、下面却有数据"的尾列被**整列丢掉**
+      （连数据一起，且不告警、退出码 0）。2026-09-25 实测确认。
+      表头空但有数据的列必须保留，列名交由 check()/repair() 补成 col_N。
+    """
     if row_index < 1 or row_index > sheet.nrows:
         return None, []
+    bottom = [list(r) for r in sheet.rows[row_index:]]
     header = list(sheet.rows[row_index - 1])
-    while len(header) > 1 and is_blank(header[-1]):
+    while len(header) > 1 and is_blank(header[-1]) \
+            and _column_all_blank(bottom, len(header) - 1):
         header.pop()
-    rows = [list(r[:len(header)]) for r in sheet.rows[row_index:]]
+    rows = [list(r[:len(header)]) for r in bottom]
     return header, rows
 
 
@@ -174,6 +190,7 @@ def merge_options(args: argparse.Namespace, settings: Settings) -> SqlOptions:
     wrap = args.wrap or settings.wrap
     empty_as_null = settings.empty_as_null if args.empty_as_null is None else args.empty_as_null
     all_string = settings.all_string if args.all_string is None else args.all_string
+    infer_types = settings.infer_types if args.infer_types is None else args.infer_types
     return SqlOptions(
         dialect=resolve(dialect),
         table=args.table or settings.table,
@@ -181,6 +198,7 @@ def merge_options(args: argparse.Namespace, settings: Settings) -> SqlOptions:
         wrap=wrap if fmt == 'union' else 'plain',
         empty_as_null=empty_as_null,
         all_string=all_string,
+        infer_types=infer_types,
         batch_size=args.batch_size or settings.batch_size,
     )
 
@@ -404,6 +422,11 @@ def batch(args: argparse.Namespace, settings: Settings) -> int:
     else:
         header_row, reason = detect_header(sheet.rows)      # 自动识别：无需交互
         print('表头自动识别：{}'.format(reason), file=sys.stderr)
+        if args.strict_header and header_row != 1:
+            print('--strict-header 要求表头在第 1 行，但自动识别跳过了前 {} 行；'
+                  '请人工确认后加 --header-row {} 明确指定。'.format(header_row - 1, header_row),
+                  file=sys.stderr)
+            return EXIT_UNCLEAN
 
     header, rows = split_header(sheet, header_row)
     if header is None:
@@ -479,6 +502,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help='所有列强制按字符串输出')
     neg.add_argument('--no-all-string', dest='all_string', action='store_false',
                      help='按列推断类型')
+    neg.add_argument('--infer-types', dest='infer_types', action='store_true', default=None,
+                     help='CSV 等无类型信息的输入：整列都是数字时按数字输出（避免 union 产物丢类型）')
+    neg.add_argument('--no-infer-types', dest='infer_types', action='store_false',
+                     help='不推断类型（CSV 的列一律按字符串输出）')
     neg.add_argument('--copy-clipboard', dest='copy_clipboard', action='store_true', default=None,
                      help='生成后复制到剪贴板')
     neg.add_argument('--no-copy-clipboard', dest='copy_clipboard', action='store_false',
@@ -488,6 +515,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--input-encoding', help='CSV 输入编码（默认自动尝试）')
     p.add_argument('--delimiter', help='CSV 分隔符（默认自动探测）')
     p.add_argument('--force', action='store_true', help='表头不规范时自动修复并继续（非交互模式）')
+    p.add_argument('--strict-header', action='store_true',
+                   help='要求表头必须在第 1 行：自动识别若需要跳过行就直接报错退出（退出码 2）')
     p.add_argument('--config', help='指定配置文件路径')
     p.add_argument('--init-config', action='store_true',
                    help='在当前目录生成 excel2sql.ini 模板后退出')

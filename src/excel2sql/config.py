@@ -45,6 +45,8 @@ class Settings:
     # [data]
     empty_as_null: bool = False
     all_string: bool = False
+    # CSV 等无类型信息的输入：整列都是数字时按数字输出（否则 CSV 所有列都会被字符串化）
+    infer_types: bool = False
     header_row: str = 'auto'            # auto | 1 | 2 ...
 
     # [ui]
@@ -192,6 +194,10 @@ filename = {name}_{sheet}_hardcode.sql
 empty_as_null = false
 # 所有列强制按字符串输出
 all_string = false
+# CSV 等无类型信息的输入：整列都是数字时按数字输出
+# （CSV 读出来全是文本，不开这项的话所有列都会按字符串输出）
+# 注意：带前导零的列（如 "007"）不会被转换，以免丢信息
+infer_types = false
 # 表头行号: auto = 自动识别（交互里会打印预览让你确认）, 或写 1 / 2 / ...
 header_row = auto
 

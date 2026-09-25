@@ -36,6 +36,9 @@ filename = {name}_{sheet}_hardcode.sql
 empty_as_null = false
 # 所有列强制按字符串输出
 all_string = false
+# CSV 没有类型信息，读出来一律是文本；打开后整列都能解析成数字的列会还原成数字
+# （带前导零的编号如 007 不转，避免丢信息）。Excel 源不受影响。
+infer_types = false
 # 表头行号: auto = 自动识别（交互里会打印预览让你确认）, 或写 1 / 2 / ...
 header_row = auto
 
