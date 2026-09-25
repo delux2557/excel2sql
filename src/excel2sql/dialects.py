@@ -95,7 +95,19 @@ POSTGRESQL = Dialect(
     string_prefix='', concat='pipe', newline_expr='CHR(10)',
 )
 
-DIALECTS: Dict[str, Dialect] = {d.key: d for d in (SQLSERVER, MYSQL, ORACLE, POSTGRESQL)}
+SQLITE = Dialect(
+    key='sqlite', name='SQLite', ident_open='"', ident_close='"',
+    string_prefix='', concat='pipe', newline_expr='CHAR(10)',
+    # 日期不加包装：SQLite 没有日期类型，ISO-8601 文本就是它的规范表示，
+    # 而 '2024-11-11' / '2024-11-11 13:05:00' 这样的字面量能被 date()/strftime()
+    # 直接识别（实测 strftime('%Y', "订购日期") 正常返回 '2024'）。
+    #
+    # 规律是「只有真正需要包装的方言才加前缀」—— 目前只有 Oracle 需要
+    # （裸字符串参与日期比较会失败，必须 TO_DATE）。SQL Server / MySQL / PostgreSQL
+    # 都由上下文自动转换，SQLite 则根本不需要转。
+)
+
+DIALECTS: Dict[str, Dialect] = {d.key: d for d in (SQLSERVER, MYSQL, ORACLE, POSTGRESQL, SQLITE)}
 
 # 命令行/交互输入的别名 -> 方言 key
 ALIASES = {
@@ -103,10 +115,13 @@ ALIASES = {
     '2': 'mysql', 'mysql': 'mysql', 'mariadb': 'mysql',
     '3': 'oracle', 'oracle': 'oracle', 'ora': 'oracle',
     '4': 'postgresql', 'postgresql': 'postgresql', 'postgres': 'postgresql', 'pg': 'postgresql',
+    '5': 'sqlite', 'sqlite': 'sqlite', 'sqlite3': 'sqlite',
 }
 
-MENU = '   '.join('{}={}'.format(k, DIALECTS[k].name) for k in ('sqlserver', 'mysql', 'oracle', 'postgresql'))
-NUMBERED = {'1': 'sqlserver', '2': 'mysql', '3': 'oracle', '4': 'postgresql'}
+ORDER = ('sqlserver', 'mysql', 'oracle', 'postgresql', 'sqlite')
+
+MENU = '   '.join('{}={}'.format(k, DIALECTS[k].name) for k in ORDER)
+NUMBERED = {str(i): k for i, k in enumerate(ORDER, start=1)}
 
 
 def resolve(value: str) -> Dialect:

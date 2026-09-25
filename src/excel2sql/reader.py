@@ -11,9 +11,23 @@ EXCEL_EXT = {'.xlsx', '.xlsm'}
 CSV_EXT = {'.csv'}
 SUPPORTED_EXT = EXCEL_EXT | CSV_EXT | {'.xls'}
 
+# 单元格自带类型信息的扩展名：xlsx/xls 的单元格有类型（数字就是数字，文本就是文本）
+TYPED_EXT = EXCEL_EXT | {'.xls'}
+
 # 编码尝试顺序：中文环境最常见的是 gb18030（gbk 超集）与 utf-8-sig（Excel 导出）
 CSV_ENCODINGS = ('utf-8-sig', 'gb18030', 'utf-8', 'gbk')
 CSV_DELIMITERS = (',', ';', '\t', '|')
+
+
+def has_type_info(path) -> bool:
+    """该文件的数据是否自带单元格类型信息。
+
+    xlsx/xls 里数字与文本是分开存的，读出来就带类型；
+    CSV 是无类型纯文本，**每一格读出来都是 str** —— 要不要按数字处理
+    只能靠内容推断（这就是 `infer_types = auto` 只对 CSV 生效的原因：
+    Excel 源里写成文本的单元格，是用户有意写成文本的，不该被改写）。
+    """
+    return Path(path).suffix.lower() in TYPED_EXT
 
 
 @dataclass

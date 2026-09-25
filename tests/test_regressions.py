@@ -15,9 +15,9 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from excel2sql import headers, sqlgen
+from excel2sql import dialects, headers, sqlgen
 from excel2sql.cli import EXIT_OK, EXIT_UNCLEAN, main, split_header
-from excel2sql.reader import Sheet
+from excel2sql.reader import Sheet, has_type_info
 
 openpyxl = None
 try:
@@ -184,10 +184,26 @@ class TestCsvTypeInference(unittest.TestCase):
             self.assertEqual(code, EXIT_OK, err)
             return (root / 'o.sql').read_text(encoding='utf-8')
 
-    def test_default_stays_text(self):
-        """默认行为不变：CSV 一律按字符串输出（保守，避免隐式转换意外）。"""
+    def test_auto_infers_for_csv_by_default(self):
+        """默认 auto：**CSV** 的数字列还原成数字。
+
+        不推断的话 SQL Server 会把列落成 nvarchar、PG 落成 text，
+        `SUM()` 三库全部报错（SS `Msg 8117` / PG `function sum(text) does not exist`）。
+        """
         sql = self._sql([])
+        self.assertIn('2 AS [数量]', sql)
+        self.assertIn('221.98 AS [金额]', sql)
+        self.assertNotIn("N'2'", sql)
+
+    def test_no_infer_types_keeps_text(self):
+        """想要「一律按字符串」显式关掉即可 —— 老行为仍可完整复现。"""
+        sql = self._sql(['--no-infer-types'])
         self.assertIn("N'2' AS [数量]", sql)
+
+    def test_date_column_stays_text(self):
+        """日期列不猜类型：CSV 的日期保持文本（各库的日期函数/格式差异太大）。"""
+        sql = self._sql([])
+        self.assertIn("N'2024-11-11' AS [订购日期]", sql)
 
     def test_infer_types_restores_numeric_literals(self):
         sql = self._sql(['--infer-types'])
@@ -212,6 +228,134 @@ class TestCsvTypeInference(unittest.TestCase):
             self.assertEqual(code, EXIT_OK, err)
             sql = (root / 'o.sql').read_text(encoding='utf-8')
             self.assertIn("N'1'", sql)
+
+
+class TestInferTypesAuto(unittest.TestCase):
+    """`infer_types = auto`：只在「输入本身不带类型信息」时才推断。
+
+    这条边界很重要 —— xlsx/xls 的单元格自带类型，**写成文本就是用户有意的文本**，
+    auto 不该去改写；否则工具会悄悄推翻用户已经明确表达过的意图。
+    """
+
+    def test_csv_has_no_type_info(self):
+        for name in ('x.csv', 'X.CSV', 'a.b.csv'):
+            with self.subTest(name=name):
+                self.assertFalse(has_type_info(name))
+
+    def test_excel_carries_type_info(self):
+        for name in ('x.xlsx', 'x.xlsm', 'x.xls', 'X.XLSX'):
+            with self.subTest(name=name):
+                self.assertTrue(has_type_info(name))
+
+    @unittest.skipIf(openpyxl is None, '需要 openpyxl')
+    def test_excel_text_cell_is_not_coerced(self):
+        """xlsx 里显式写成文本的 '123' 必须原样输出。
+
+        带 --header-row 1 是为了把表头识别这个变量排除掉，只测推断决策。
+        """
+        with _Dir() as root:
+            src = write_xlsx(root, 't.xlsx', [['编号', '名称'], ['123', '甲']])
+            code, _, err = run([str(src), '--header-row', '1', '-o', str(root / 'o.sql')])
+            self.assertEqual(code, EXIT_OK, err)
+            self.assertIn("N'123'", (root / 'o.sql').read_text(encoding='utf-8'))
+
+    @unittest.skipIf(openpyxl is None, '需要 openpyxl')
+    def test_excel_number_cell_stays_numeric(self):
+        with _Dir() as root:
+            src = write_xlsx(root, 't.xlsx', [['数量', '名称'], [123, '甲']])
+            code, _, err = run([str(src), '--header-row', '1', '-o', str(root / 'o.sql')])
+            self.assertEqual(code, EXIT_OK, err)
+            self.assertIn('123 AS [数量]', (root / 'o.sql').read_text(encoding='utf-8'))
+
+    @unittest.skipIf(openpyxl is None, '需要 openpyxl')
+    def test_explicit_flag_overrides_the_source_rule(self):
+        """显式 --infer-types 不受 auto 的来源限制：Excel 源也照做。"""
+        with _Dir() as root:
+            src = write_xlsx(root, 't.xlsx', [['编号', '名称'], ['123', '甲']])
+            code, _, err = run([str(src), '--header-row', '1', '--infer-types',
+                                '-o', str(root / 'o.sql')])
+            self.assertEqual(code, EXIT_OK, err)
+            self.assertIn('123 AS [编号]', (root / 'o.sql').read_text(encoding='utf-8'))
+
+    def test_config_accepts_auto_on_off(self):
+        """配置文件里 auto / true / false 都能写 —— 旧配置（true/false）不会失效。
+
+        在 CSV 源上：auto 与 on 都推断成数字，off 保持文本。
+        """
+        cases = [('auto', True), ('true', True), ('on', True),
+                 ('false', False), ('off', False)]
+        for raw, numeric in cases:
+            with self.subTest(value=raw):
+                with _Dir() as root:
+                    (root / 'excel2sql.ini').write_text(
+                        '[data]\ninfer_types = {}\n'.format(raw), encoding='utf-8')
+                    src = write_csv(root, 'n.csv', '数量\n2\n')
+                    code, _, err = run([str(src), '-o', str(root / 'o.sql')])
+                    self.assertEqual(code, EXIT_OK, err)
+                    sql = (root / 'o.sql').read_text(encoding='utf-8')
+                    self.assertIn('2 AS [数量]' if numeric else "N'2' AS [数量]", sql)
+
+    def test_unknown_config_value_warns_and_falls_back_to_auto(self):
+        with _Dir() as root:
+            (root / 'excel2sql.ini').write_text('[data]\ninfer_types = maybe\n', encoding='utf-8')
+            src = write_csv(root, 'n.csv', '数量\n2\n')
+            code, _, err = run([str(src), '-o', str(root / 'o.sql')])
+            self.assertEqual(code, EXIT_OK)
+            self.assertIn('infer_types', err)                    # 有告警，不静默
+            self.assertIn('2 AS [数量]', (root / 'o.sql').read_text(encoding='utf-8'))
+
+
+class TestNumericSafetyBoundary(unittest.TestCase):
+    """数字推断的安全边界：宁可留在文本，也不要造出会报错或丢信息的字面量。"""
+
+    def test_15_digit_integer_is_coerced(self):
+        rows = sqlgen.coerce_numeric_columns([['123456789012345'], ['1']])
+        self.assertEqual(rows, [[123456789012345], [1]])
+
+    def test_long_integer_stays_text(self):
+        """16 位以上越过 Excel 的精度上限 —— 基本是编号而不是数量。"""
+        rows = sqlgen.coerce_numeric_columns([['1234567890123456'], ['1']])
+        self.assertEqual(rows, [['1234567890123456'], ['1']])
+
+    def test_bigint_overflow_is_refused(self):
+        """20 位数字硬转成数字字面量，会让 SQL Server / PG 的 bigint 直接溢出报错。"""
+        rows = sqlgen.coerce_numeric_columns([['9223372036854775808']])   # bigint 上限 + 1
+        self.assertEqual(rows, [['9223372036854775808']])
+
+    def test_float_beyond_double_precision_stays_text(self):
+        """转成 float 会静默丢尾数，那就别转。"""
+        rows = sqlgen.coerce_numeric_columns([['1.2345678901234567890'], ['2.5']])
+        self.assertEqual(rows, [['1.2345678901234567890'], ['2.5']])
+
+    def test_ordinary_float_is_coerced(self):
+        rows = sqlgen.coerce_numeric_columns([['221.98'], ['3709.39']])
+        self.assertEqual(rows, [[221.98], [3709.39]])
+
+    def test_known_limit_eleven_digit_id_is_coerced(self):
+        """已知边界（有意记录）：11 位手机号能无损装进 bigint，因此仍会被转成数字。
+
+        要保住这类编号，用 `--no-infer-types`，或让编号带前导零（那样会自动保留文本）。
+        """
+        rows = sqlgen.coerce_numeric_columns([['13800138000']])
+        self.assertEqual(rows, [[13800138000]])
+
+    def test_all_string_skips_coercion(self):
+        """--all-string 是「全部按字符串」，此时不该再转数字。
+
+        否则数字列里的空格子会被顺带改成 NULL，与「全部字符串」自相矛盾。
+        （夹具必须有两个列：只有一列且整行空的话，会在更早的「丢弃全空行」那步就被滤掉。）
+        """
+        rows = [['1', 'x'], ['', 'y']]
+        base = {'dialect': dialects.SQLSERVER, 'infer_types': True}
+
+        with_all = sqlgen.build_sql(['a', 'b'], rows,
+                                    sqlgen.SqlOptions(all_string=True, **base))
+        self.assertIn("N'1' AS [a], N'x' AS [b]", with_all)
+        self.assertIn("N'' AS [a], N'y' AS [b]", with_all)
+
+        without = sqlgen.build_sql(['a', 'b'], rows, sqlgen.SqlOptions(**base))
+        self.assertIn('1 AS [a]', without)
+        self.assertIn('NULL AS [a], N\'y\' AS [b]', without)   # 数字列里的空格 -> NULL
 
 
 class TestCoerceNumericColumns(unittest.TestCase):

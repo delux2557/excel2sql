@@ -15,18 +15,20 @@ from typing import List, Optional, Sequence, Tuple
 
 from . import __version__
 from .clipboard import copy_text
-from .config import (ConfigError, Settings, unique_path, write_template)
+from .config import (ConfigError, INFER_AUTO, INFER_OFF, INFER_ON, Settings,
+                     unique_path, write_template)
 from .config import load as load_settings
 from .dialects import DIALECTS, resolve
+from .dialects import ORDER as DIALECT_ORDER
 from .headers import check as check_header
 from .headers import detect as detect_header, is_blank, repair
-from .reader import ReadError, Sheet, probe_sheets, read_sheet_rows, scan_dir
+from .reader import (ReadError, Sheet, has_type_info, probe_sheets,
+                     read_sheet_rows, scan_dir)
 from .sqlgen import SqlGenError, SqlOptions, UNION_ROW_WARN, build_sql, write_sql
 
 EXIT_OK, EXIT_ERROR, EXIT_UNCLEAN = 0, 1, 2
 # 超过这个行数，硬编码 SQL 基本已经不适合
 HARD_LIMIT_ROWS = 200_000
-DIALECT_ORDER = ('sqlserver', 'mysql', 'oracle', 'postgresql')
 
 BANNER = """{sep}
   excel2sql {ver}  |  Excel / CSV  ->  硬编码 SQL
@@ -183,14 +185,36 @@ def choose_header_row(sheet: Sheet, suggested: int) -> int:
 
 
 # ------------------------------------------------------------------ 选项合并
-def merge_options(args: argparse.Namespace, settings: Settings) -> SqlOptions:
+def resolve_infer_types(args: argparse.Namespace, settings: Settings,
+                        source_path=None) -> bool:
+    """把 auto / on / off 解析成确定的布尔。
+
+    `auto` 的含义是「只在**需要且安全**时才推断」：
+    - **需要**：只有 CSV 这类无类型信息的输入才需要 —— 读出来每一格都是 str，
+      不推断的话所有列都会变成字符串，`SUM()` 直接报错；
+      xlsx/xls 的单元格自带类型，写成文本的单元格是用户有意的选择，不动。
+    - **安全**：交给 coerce_numeric_columns 把关（整列可无损解析才转）。
+    """
+    if args.infer_types is not None:
+        return args.infer_types                       # 命令行显式开关优先级最高
+    mode = str(settings.infer_types or INFER_AUTO).strip().lower()
+    if mode == INFER_ON:
+        return True
+    if mode == INFER_OFF:
+        return False
+    if source_path is None:
+        return False                                  # 问不到来源就保守处理
+    return not has_type_info(source_path)
+
+
+def merge_options(args: argparse.Namespace, settings: Settings,
+                  source_path=None) -> SqlOptions:
     """命令行参数 > 配置文件 > 内置默认。"""
     dialect = resolve(args.dialect).key if args.dialect else settings.dialect
     fmt = args.fmt or settings.format
     wrap = args.wrap or settings.wrap
     empty_as_null = settings.empty_as_null if args.empty_as_null is None else args.empty_as_null
     all_string = settings.all_string if args.all_string is None else args.all_string
-    infer_types = settings.infer_types if args.infer_types is None else args.infer_types
     return SqlOptions(
         dialect=resolve(dialect),
         table=args.table or settings.table,
@@ -198,7 +222,7 @@ def merge_options(args: argparse.Namespace, settings: Settings) -> SqlOptions:
         wrap=wrap if fmt == 'union' else 'plain',
         empty_as_null=empty_as_null,
         all_string=all_string,
-        infer_types=infer_types,
+        infer_types=resolve_infer_types(args, settings, source_path),
         batch_size=args.batch_size or settings.batch_size,
     )
 
@@ -323,7 +347,7 @@ def interactive(args: argparse.Namespace, settings: Settings, config_path) -> in
                                       'y' if settings.copy_clipboard else 'N').lower() == 'y'
 
     try:
-        options = merge_options(args, settings)
+        options = merge_options(args, settings, target)
     except (ConfigError, SqlGenError) as e:
         print('配置错误：{}'.format(e))
         return EXIT_ERROR
@@ -453,7 +477,7 @@ def batch(args: argparse.Namespace, settings: Settings) -> int:
               .format(len(rows)), file=sys.stderr)
 
     try:
-        options = merge_options(args, settings)
+        options = merge_options(args, settings, target)
     except (ConfigError, SqlGenError) as e:
         print('配置错误：{}'.format(e), file=sys.stderr)
         return EXIT_ERROR
@@ -487,7 +511,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('-s', '--sheet', help='工作表名（多 sheet 时必须指定）')
     p.add_argument('-o', '--out', help='输出 SQL 路径（默认按配置 output_dir 生成）')
     p.add_argument('-d', '--dialect', metavar='NAME',
-                   help='方言：sqlserver / mysql / oracle / postgresql，也可用 1~4')
+                   help='方言：{}，也可用 1~{}'.format(' / '.join(DIALECT_ORDER), len(DIALECT_ORDER)))
     p.add_argument('--header-row', metavar='N', default=None,
                    help='表头行号；auto（默认）表示自动识别')
     p.add_argument('--format', dest='fmt', choices=('union', 'insert'), help='输出格式')
@@ -503,9 +527,9 @@ def build_parser() -> argparse.ArgumentParser:
     neg.add_argument('--no-all-string', dest='all_string', action='store_false',
                      help='按列推断类型')
     neg.add_argument('--infer-types', dest='infer_types', action='store_true', default=None,
-                     help='CSV 等无类型信息的输入：整列都是数字时按数字输出（避免 union 产物丢类型）')
+                     help='强制推断类型：整列都能无损解析成数字时按数字输出（Excel 源也照做）')
     neg.add_argument('--no-infer-types', dest='infer_types', action='store_false',
-                     help='不推断类型（CSV 的列一律按字符串输出）')
+                     help='关闭推断：CSV 的列一律按字符串输出')
     neg.add_argument('--copy-clipboard', dest='copy_clipboard', action='store_true', default=None,
                      help='生成后复制到剪贴板')
     neg.add_argument('--no-copy-clipboard', dest='copy_clipboard', action='store_false',

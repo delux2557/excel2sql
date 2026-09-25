@@ -82,5 +82,66 @@ class TestDateFormats(unittest.TestCase):
         self.assertEqual(dialects.SQLSERVER.datetime_suffix, '')
 
 
+class TestSqlite(unittest.TestCase):
+    """SQLite：无 N 前缀、标识符用双引号、没有原生日期类型。"""
+
+    def test_identifier_quoting(self):
+        self.assertEqual(dialects.SQLITE.quote_ident('a"b'), '"a""b"')
+        self.assertEqual(dialects.SQLITE.quote_ident('客户 ID'), '"客户 ID"')
+
+    def test_no_n_prefix(self):
+        self.assertEqual(dialects.SQLITE.string_prefix, '')
+        self.assertEqual(dialects.SQLITE.quote_string("it's"), "'it''s'")
+
+    def test_backslash_is_not_an_escape(self):
+        """只有 MySQL 默认把反斜杠当转义符，SQLite 不是。"""
+        self.assertEqual(dialects.SQLITE.quote_string('C:\\temp'), "'C:\\temp'")
+
+    def test_pipe_concat(self):
+        self.assertEqual(dialects.SQLITE.concat_strings(["'a'", "'b'"], 'CHAR(10)'),
+                         "'a' || CHAR(10) || 'b'")
+
+    def test_date_has_no_wrapper(self):
+        """SQLite 没有日期类型，ISO 文本就是规范表示，不需要（也不该）包一层。
+
+        只有 Oracle 需要包装（裸字符串参与日期比较会失败）。
+        """
+        self.assertEqual(dialects.SQLITE.date_prefix, '')
+        self.assertEqual(dialects.SQLITE.date_suffix, '')
+        self.assertEqual(dialects.SQLITE.datetime_prefix, '')
+        self.assertEqual(dialects.SQLITE.datetime_suffix, '')
+        self.assertNotIn('TO_DATE', dialects.SQLITE.date_suffix)
+
+    def test_no_dual(self):
+        self.assertEqual(dialects.SQLITE.dual, '')
+
+    def test_resolve_aliases(self):
+        for value in ('sqlite', 'SQLite', 'SQLITE', 'sqlite3', '5'):
+            with self.subTest(value=value):
+                self.assertIs(dialects.resolve(value), dialects.SQLITE)
+
+
+class TestDialectRegistry(unittest.TestCase):
+    """方言清单只有一处定义（dialects.ORDER），编号/菜单都从它派生，不许各写一份。"""
+
+    def test_no_orphan_dialect(self):
+        self.assertEqual(set(dialects.DIALECTS), set(dialects.ORDER))
+
+    def test_numbered_matches_order(self):
+        self.assertEqual(tuple(dialects.NUMBERED),
+                         tuple(str(i) for i in range(1, len(dialects.ORDER) + 1)))
+        for num, key in dialects.NUMBERED.items():
+            self.assertIs(dialects.resolve(num), dialects.DIALECTS[key])
+
+    def test_menu_lists_every_dialect(self):
+        for key in dialects.ORDER:
+            self.assertIn(dialects.DIALECTS[key].name, dialects.MENU)
+
+    def test_every_alias_points_to_a_real_dialect(self):
+        for alias, key in dialects.ALIASES.items():
+            with self.subTest(alias=alias):
+                self.assertIn(key, dialects.DIALECTS)
+
+
 if __name__ == '__main__':
     unittest.main()

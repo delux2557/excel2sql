@@ -249,7 +249,8 @@ class TestOptions(unittest.TestCase):
             src = make_csv(root, text='a,b\n,1\n')
             out = root / 'o.sql'
             run([str(src), '--empty-as-null', '-o', str(out)])
-            self.assertIn('SELECT NULL AS [a], N\'1\' AS [b]', out.read_text(encoding='utf-8'))
+            # 空串 -> NULL；b 列是纯数字，CSV 源下被 auto 推断还原成数字字面量
+            self.assertIn('SELECT NULL AS [a], 1 AS [b]', out.read_text(encoding='utf-8'))
 
     def test_utf8_sig_output(self):
         with _Sandbox(self) as root:
@@ -307,7 +308,8 @@ header_row = 1
             self.assertTrue(out.is_file(), err)
             sql = out.read_text(encoding='utf-8-sig')
             self.assertIn('INSERT INTO `TMP`', sql)        # dialect + table
-            self.assertIn('(NULL, \'1\')', sql)            # empty_as_null
+            # empty_as_null（空串->NULL）+ CSV 默认 auto 推断（数字列还原成数字）
+            self.assertIn('(NULL, 1)', sql)
 
     def test_cli_overrides_config(self):
         with _Sandbox(self) as root:

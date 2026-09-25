@@ -14,7 +14,9 @@ def opts(**kw):
 
 
 def selects(sql):
-    return [l for l in sql.split('\n') if l.startswith('SELECT ') and not l.startswith('SELECT *')]
+    """产物里「一行一条数据」的 SELECT 语句（CTE 体内有缩进，先 strip 再判）。"""
+    lines = (l.strip() for l in sql.split('\n'))
+    return [l for l in lines if l.startswith('SELECT ') and not l.startswith('SELECT *')]
 
 
 class TestLiterals(unittest.TestCase):
@@ -151,15 +153,20 @@ class TestFormats(unittest.TestCase):
         sql = build_sql(['a'], [[i] for i in range(5)], opts())
         self.assertEqual(sql.count('UNION ALL'), 4)
 
-    def test_union_all_on_its_own_line(self):
-        """UNION ALL 必须独立成行：与上一行粘连会造出 [a]UNION 这类坏 token。"""
-        sql = build_sql(['a'], [[1], [2]], opts())
-        self.assertIn('SELECT 1 AS [a]\nUNION ALL\nSELECT 2 AS [a]', sql)
-        self.assertNotIn('UNION ALL\n', sql.replace('\nUNION ALL\n', ''))
+    def test_union_all_is_always_a_line_of_its_own(self):
+        """UNION ALL 必须独占一行：与上一行粘连会造出 [a]UNION 这类坏 token。
+
+        两种包裹方式都要守：CTE 体内允许缩进，但整行除了缩进不能有别的东西。
+        """
+        for wrap, expected in (('cte', '    UNION ALL'), ('plain', 'UNION ALL')):
+            with self.subTest(wrap=wrap):
+                sql = build_sql(['a'], [[1], [2]], opts(wrap=wrap))
+                self.assertEqual([l for l in sql.split('\n') if 'UNION ALL' in l],
+                                 [expected])
 
     def test_oracle_dual_not_glued_to_union(self):
         """Oracle 下 SELECT ... FROM dual 后面紧贴 UNION ALL 会解析失败。"""
-        sql = build_sql(['a'], [[1], [2]], opts(dialect=dialects.ORACLE))
+        sql = build_sql(['a'], [[1], [2]], opts(dialect=dialects.ORACLE, wrap='plain'))
         self.assertIn('FROM dual\nUNION ALL\n', sql)
 
     def test_plain_wrap_union_on_own_line(self):
@@ -180,6 +187,48 @@ class TestFormats(unittest.TestCase):
     def test_insert_mysql_backticks(self):
         sql = build_sql(['a'], [[1]], opts(dialect=dialects.MYSQL, fmt='insert'))
         self.assertIn('INSERT INTO `HARDCODE` (`a`) VALUES', sql)
+
+
+class TestCteLayout(unittest.TestCase):
+    """CTE 体内缩进一级、闭合括号回到行首（对齐 sqlfluff 等工具的默认风格）。"""
+
+    def test_inner_selects_and_union_are_indented(self):
+        sql = build_sql(['a'], [[1], [2]], opts())
+        self.assertIn('WITH [HARDCODE] AS (\n', sql)
+        self.assertIn('\n    SELECT 1 AS [a]\n', sql)
+        self.assertIn('\n    UNION ALL\n', sql)
+        self.assertIn('\n    SELECT 2 AS [a]\n)\nSELECT * FROM [HARDCODE];\n', sql)
+
+    def test_closing_paren_returns_to_column_zero(self):
+        sql = build_sql(['a'], [[1], [2]], opts())
+        lines = sql.split('\n')
+        self.assertEqual(lines[lines.index('    SELECT 2 AS [a]') + 1], ')')
+
+    def test_every_row_line_is_indented_exactly_once(self):
+        sql = build_sql(['a'], [[i] for i in range(4)], opts())
+        body = [l for l in sql.split('\n')
+                if l.strip().startswith('SELECT ') and not l.strip().startswith('SELECT *')]
+        self.assertEqual(len(body), 4)
+        for line in body:
+            self.assertTrue(line.startswith('    '), line)
+            self.assertFalse(line.startswith('     '), line)   # 只缩进一级
+
+    def test_plain_wrap_is_not_indented(self):
+        """plain 是给「嵌进已有 SQL」用的，缩进交给调用方按所在层级对齐。"""
+        sql = build_sql(['a'], [[1], [2]], opts(wrap='plain'))
+        self.assertIn('SELECT 1 AS [a]\nUNION ALL\nSELECT 2 AS [a]', sql)
+        self.assertNotIn('    SELECT', sql)
+
+    def test_indent_does_not_leak_into_insert(self):
+        sql = build_sql(['a', 'b'], [[1, 'x']], opts(fmt='insert'))
+        self.assertNotIn('    ', sql)
+
+    def test_header_comments_are_not_indented(self):
+        sql = build_sql(['a'], [[1]], opts())
+        head = [l for l in sql.split('\n') if l.startswith('--')]
+        self.assertTrue(head)
+        for line in head:
+            self.assertFalse(line.startswith(' '), line)
 
 
 class TestRowsAndErrors(unittest.TestCase):

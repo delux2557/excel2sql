@@ -11,6 +11,7 @@ import datetime
 import math
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
@@ -23,9 +24,17 @@ WRAPS = ('cte', 'plain')
 # 超过该行数仍用 UNION ALL 会明显拖慢解析，默认建议 insert
 UNION_ROW_WARN = 2000
 
+# CTE 体内每行缩进的宽度
+CTE_INDENT = '    '
+
 # 纯数字文本（--infer-types 用）
 _INT_RE = re.compile(r'[+-]?\d+')
 _FLOAT_RE = re.compile(r'[+-]?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?')
+
+# 有效数字上限。取 15 是因为 Excel 本身只保证 15 位有效数字：
+# 越过这条线的"数字"几乎一定是编号/账号而不是数量，而且 19 位以上还会超出
+# SQL Server / MySQL / PostgreSQL 的 bigint 范围 —— 硬转成数字字面量会直接报错。
+MAX_SIG_DIGITS = 15
 
 # 「按字符串输出」的原因分档 —— 写进产物头注释，让"用户要求的"与"工具被迫的"可区分
 REASON_ALL_STRING = '用户指定 --all-string'
@@ -45,7 +54,9 @@ class SqlOptions:
     wrap: str = 'cte'               # cte | plain（仅 union 生效）
     empty_as_null: bool = False     # 空字符串视为 NULL
     all_string: bool = False        # 所有列强制按字符串输出
-    infer_types: bool = False       # CSV 等无类型信息：整列是数字时按数字输出
+    infer_types: bool = False       # 源数据无类型信息（CSV）：整列是数字时按数字输出
+                                    # 注：auto/on/off 的判定与「源文件是否自带类型」在 cli 层完成，
+                                    # 到这一层已经是确定的是/否
     batch_size: int = 500           # insert 模式每批行数
 
     def __post_init__(self) -> None:
@@ -79,11 +90,26 @@ def infer_column_types(header: Sequence[object], rows: Sequence[Sequence[object]
     return force
 
 
+def _sig_digits(text: str) -> int:
+    """数字文本的有效位数。
+
+    用 Decimal 解析，省得自己处理前导零与指数记号；解析不了就返回一个
+    大于任何阈值的大数，让调用方按「不安全」处理。
+    """
+    try:
+        return len(Decimal(text).as_tuple().digits)
+    except (InvalidOperation, ValueError):
+        return MAX_SIG_DIGITS + 1
+
+
 def _as_number(text: str):
     """把纯数字文本转成 int/float；不是数字则返回 None。
 
-    **带前导零的整数（'007'）刻意不转** —— 转成 7 会丢信息，
-    而这类列本来就更可能是编号而不是数量。
+    两道刻意的保守规则：
+    - **带前导零的整数（'007'）不转** —— 转成 7 会丢信息，这类列本来更可能是编号；
+    - **有效位数超过 15 位的不转** —— 见 MAX_SIG_DIGITS 的说明。
+
+    小数不受前导零规则约束：'007.5' 与 '7.5' 是同一个数，前导零只是写法。
     """
     t = text.strip()
     if not t:
@@ -92,8 +118,12 @@ def _as_number(text: str):
         digits = t.lstrip('+-')
         if len(digits) > 1 and digits[0] == '0':
             return None                            # '007' / '000123' 保持文本
+        if _sig_digits(digits) > MAX_SIG_DIGITS:
+            return None                            # 多半是编号，且再长会有溢出风险
         return int(t)
     if _FLOAT_RE.fullmatch(t):
+        if _sig_digits(t) > MAX_SIG_DIGITS:
+            return None                            # 超出双精度可无损表达的范围
         try:
             return float(t)
         except ValueError:
@@ -221,7 +251,9 @@ def prepare(header: Sequence[object], rows: Sequence[Sequence[object]], opts: Sq
     data = [list(r[:ncols]) for r in rows if not all(is_blank(v) for v in list(r)[:ncols])]
     if not data:
         raise SqlGenError('没有有效数据行')
-    if opts.infer_types:
+    # --all-string 是「所有列都按字符串输出」，此时再转数字既无意义，
+    # 又会把数字列里的空格子变成 NULL —— 与"全部按字符串"自相矛盾。
+    if opts.infer_types and not opts.all_string:
         data = coerce_numeric_columns(data)
     force = infer_column_types(header, data, opts.all_string, opts.empty_as_null)
     return list(header), data, force
@@ -249,12 +281,17 @@ def _render_union(header: Sequence[object], data: Sequence[Sequence[object]],
     """每行一条 SELECT 再用 UNION ALL 串起来，可选 CTE 包裹。"""
     dia = opts.dialect
     lines = ['SELECT ' + render_row(header, r, force, opts) + dia.dual for r in data]
+
     if opts.wrap == 'plain':
+        # plain 是给「嵌进已有 SQL」用的，不缩进 —— 由调用方按所在层级自行对齐
         yield '\nUNION ALL\n'.join(lines) + '\n'
-    else:
-        yield 'WITH {} AS (\n'.format(dia.quote_ident(opts.table))
-        yield '\nUNION ALL\n'.join(lines)
-        yield '\n)\nSELECT * FROM {};\n'.format(dia.quote_ident(opts.table))
+        return
+
+    # CTE 体内缩进一级，闭合括号回到行首（sqlfluff 等格式化工具的默认风格）
+    sep = '\n' + CTE_INDENT + 'UNION ALL\n' + CTE_INDENT
+    yield 'WITH {} AS (\n'.format(dia.quote_ident(opts.table))
+    yield CTE_INDENT + sep.join(lines) + '\n'
+    yield ')\nSELECT * FROM {};\n'.format(dia.quote_ident(opts.table))
 
 
 def _render_insert(header: Sequence[object], data: Sequence[Sequence[object]],

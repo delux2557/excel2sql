@@ -20,6 +20,12 @@ CONFIG_NAME = 'excel2sql.ini'
 USER_CONFIG = Path.home() / '.excel2sql' / 'config.ini'
 DEFAULT_FILENAME = '{name}_{sheet}_hardcode.sql'
 TRUE_WORDS = {'1', 'true', 'yes', 'y', 'on'}
+FALSE_WORDS = {'0', 'false', 'no', 'n', 'off', ''}
+
+# infer_types 的三态取值
+INFER_AUTO = 'auto'     # 只在推断安全时生效（默认）
+INFER_ON = 'on'         # 强制推断
+INFER_OFF = 'off'       # 关闭
 
 
 class ConfigError(Exception):
@@ -45,8 +51,9 @@ class Settings:
     # [data]
     empty_as_null: bool = False
     all_string: bool = False
-    # CSV 等无类型信息的输入：整列都是数字时按数字输出（否则 CSV 所有列都会被字符串化）
-    infer_types: bool = False
+    # CSV 等无类型信息的输入：整列都是数字时按数字输出
+    # auto = 只在推断安全时生效（仅对 CSV 生效，且整列可无损解析才转）；on = 强制；off = 关闭
+    infer_types: str = INFER_AUTO
     header_row: str = 'auto'            # auto | 1 | 2 ...
 
     # [ui]
@@ -88,10 +95,30 @@ def _as_bool(value: str, key: str, warnings: List[str]) -> bool:
     v = str(value).strip().lower()
     if v in TRUE_WORDS:
         return True
-    if v in ('0', 'false', 'no', 'n', 'off', ''):
+    if v in FALSE_WORDS:
         return False
     warnings.append('配置项 {}={} 不是布尔值，已按 false 处理'.format(key, value))
     return False
+
+
+def _as_tristate(value: str, key: str, warnings: List[str]) -> str:
+    """auto | on | off。为了兼容旧配置，true/false 这类布尔写法也一并接受。"""
+    v = str(value).strip().lower()
+    if v == INFER_AUTO:
+        return INFER_AUTO
+    if v in TRUE_WORDS:
+        return INFER_ON
+    if v in FALSE_WORDS:
+        return INFER_OFF
+    warnings.append('配置项 {}={} 无法识别（应为 auto / true / false），已按 auto 处理'
+                    .format(key, value))
+    return INFER_AUTO
+
+
+# 取值是字面量枚举（而非布尔/整数/任意字符串）的字段 -> 专用解析器
+_PARSERS = {
+    'infer_types': _as_tristate,
+}
 
 
 def _apply(settings: Settings, path: Path, warnings: List[str]) -> None:
@@ -111,7 +138,10 @@ def _apply(settings: Settings, path: Path, warnings: List[str]) -> None:
             continue
         raw = values[f.name]
         try:
-            if f.type is bool or isinstance(getattr(settings, f.name), bool):
+            parse = _PARSERS.get(f.name)
+            if parse is not None:
+                setattr(settings, f.name, parse(raw, f.name, warnings))
+            elif f.type is bool or isinstance(getattr(settings, f.name), bool):
                 setattr(settings, f.name, _as_bool(raw, f.name, warnings))
             elif isinstance(getattr(settings, f.name), int):
                 setattr(settings, f.name, int(raw))
@@ -165,7 +195,7 @@ TEMPLATE = """# excel2sql 配置文件
 # 布尔值写 true / false。
 
 [output]
-# 目标数据库方言: sqlserver | mysql | oracle | postgresql
+# 目标数据库方言: sqlserver | mysql | oracle | postgresql | sqlite
 dialect = sqlserver
 # 输出格式: union = UNION ALL 内联表, insert = INSERT INTO ... VALUES
 format = union
@@ -194,10 +224,13 @@ filename = {name}_{sheet}_hardcode.sql
 empty_as_null = false
 # 所有列强制按字符串输出
 all_string = false
-# CSV 等无类型信息的输入：整列都是数字时按数字输出
-# （CSV 读出来全是文本，不开这项的话所有列都会按字符串输出）
-# 注意：带前导零的列（如 "007"）不会被转换，以免丢信息
-infer_types = false
+# CSV 等无类型信息的输入：整列都能无损解析成数字时按数字输出
+#   auto = 只在推断安全时生效（默认）—— 仅对 CSV 生效；Excel 源不受影响，
+#          因为 xlsx/xls 的单元格自带类型，写成文本就是有意的文本
+#   on   = 强制推断（Excel 源也照做）；off = 关闭，CSV 的列一律按字符串输出
+# 不会转换的情形：带前导零的整数（007，是编号不是数量）、有效数字超过 15 位的
+# （越过 Excel 的精度上限，多半是编号，且再长会有 bigint 溢出风险）、NaN/inf。
+infer_types = auto
 # 表头行号: auto = 自动识别（交互里会打印预览让你确认）, 或写 1 / 2 / ...
 header_row = auto
 

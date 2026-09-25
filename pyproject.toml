@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "excel2sql"
-version = "0.3.2"
+version = "0.4.0"
 description = "把 Excel / CSV 的每一行转成硬编码 SQL（UNION ALL 内联表 / INSERT VALUES）"
 readme = "README.md"
 requires-python = ">=3.9"
