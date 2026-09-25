@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import io
 import os
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -356,6 +357,40 @@ header_row = 1
             code, _, err = run([str(make_csv(root)), '-o', str(root / 'o.sql')])
             self.assertEqual(code, EXIT_OK, err)
             self.assertIn('ask_advanced', err)
+
+
+class TestConsoleEncoding(unittest.TestCase):
+    """Windows 上 stdout 走管道时默认是 ANSI 码页（en-US CI 即 cp1252），
+    中文提示不能把它打成 UnicodeEncodeError（2026-09-25 CI 真实翻车点）。"""
+
+    def _run(self, argv):
+        """在 cp1252 的 stdout/stderr 下跑一次 CLI，返回 (退出码, 原始字节)。"""
+        buf = io.BytesIO()
+        stream = io.TextIOWrapper(buf, encoding='cp1252', errors='strict', newline='')
+        with _Sandbox(self) as root:
+            src = make_csv(root, name='d.csv', text='装运方式,数量\nA-1,20\n')
+            old = sys.stdout, sys.stderr
+            sys.stdout = sys.stderr = stream
+            try:
+                code = main([str(src)] + argv)
+            finally:
+                sys.stdout, sys.stderr = old
+                stream.flush()
+            produced = (root / 'o.sql').is_file()
+        return code, buf.getvalue(), produced
+
+    def test_cp1252_stdout_does_not_crash(self):
+        code, raw, produced = self._run(['-o', 'o.sql'])
+        self.assertEqual(code, EXIT_OK)
+        self.assertTrue(produced)
+        # 管道场景应切到 UTF-8，中文照常输出
+        self.assertIn('行 x', raw.decode('utf-8'))
+
+    def test_help_survives_cp1252(self):
+        """--help 的正文是中文，也必须能打出来。"""
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(['--help'])
+        self.assertEqual(ctx.exception.code, 0)
 
 
 if __name__ == '__main__':

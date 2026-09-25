@@ -33,6 +33,28 @@ BANNER = """{sep}
 {sep}""".format(sep='=' * 58, ver=__version__)
 
 
+# ------------------------------------------------------------------ 控制台编码
+def setup_console() -> None:
+    """让中文提示在任何控制台/管道下都不会抛 UnicodeEncodeError。
+
+    Windows 上 stdout 不是终端时（CI、重定向到文件、`| more`）用的是 ANSI 码页，
+    en-US 环境即 cp1252，打印「行 x 列」这类中文字符会直接崩。策略：
+
+    * 管道/重定向 → 改用 UTF-8（数据工具该有的默认，且 CI 日志本身按 UTF-8 渲染）
+    * 交互式终端 → 保留 Python 已探测到的编码（`chcp 65001` 时即 UTF-8，
+      中文 Windows 的 cp936 也能显示中文），只把错误处理放宽，确保永不崩
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            encoding = (getattr(stream, 'encoding', '') or '').lower()
+            if encoding.replace('-', '') != 'utf8' and not stream.isatty():
+                stream.reconfigure(encoding='utf-8', errors='replace')
+            else:
+                stream.reconfigure(errors='replace')
+        except (AttributeError, OSError, ValueError):
+            pass                    # 被包装过的流（如 pytest 捕获）就保持原样
+
+
 # ------------------------------------------------------------------ 输入助手
 def ask(prompt: str, default: str = '') -> str:
     hint = ' [{}]'.format(default) if default else ''
@@ -474,6 +496,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    setup_console()
     args = build_parser().parse_args(argv)
 
     if args.init_config:

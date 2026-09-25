@@ -2,6 +2,21 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.1] - 2026-09-25
+
+首次公开推送后 CI 抓到的 Windows 专属崩溃，修掉。
+
+### 修复
+
+- **Windows 下中文提示崩溃**（`UnicodeEncodeError: 'charmap' codec ...`）：
+  stdout 不是终端时（CI、`> out.log`、`| more`）Python 用的是 ANSI 码页，
+  en-US 环境即 `cp1252`，打印「`[OK] 30 行 x 24 列`」这类中文直接抛异常并返回 1，
+  而 SQL 文件其实已经正确写出——**只在最后一行汇报上翻车**。
+  现新增 `cli.setup_console()`：管道/重定向场景切到 UTF-8，交互终端保留原编码
+  只放宽错误处理，任何情况下都不再崩。
+  （Linux/macOS 默认 UTF-8，所以此前只有 Windows 两个 job 红。）
+- 补两条回归测试：在 `cp1252` 的 stdout/stderr 下跑正常流程与 `--help`。
+
 ## [0.3.0] - 2026-09-25
 
 按实际交互体验反馈重做交互层，并把常用选择固化成配置文件。
