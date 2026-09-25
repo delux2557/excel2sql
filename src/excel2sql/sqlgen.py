@@ -12,7 +12,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from .dialects import Dialect
 from .headers import is_blank
@@ -234,29 +234,20 @@ def iter_sql(header: Sequence[object], rows: Sequence[Sequence[object]],
     return _render(header, data, force, opts)
 
 
-def _render(header: Sequence[object], data: Sequence[Sequence[object]],
-            force: Sequence[bool], opts: SqlOptions) -> Iterator[str]:
-    dia = opts.dialect
-    cols = ', '.join(dia.quote_ident(h) for h in header)
-
+def _header_comments(header: Sequence[object], data: Sequence[Sequence[object]],
+                     force: Sequence[bool], opts: SqlOptions) -> Iterator[str]:
+    """产物头注释。所有渲染器共用。"""
     yield '-- 由 excel2sql 生成：{} 行 x {} 列\n'.format(len(data), len(header))
-    yield '-- 方言：{}   输出格式：{}\n'.format(dia.name, opts.fmt)
+    yield '-- 方言：{}   输出格式：{}\n'.format(opts.dialect.name, opts.fmt)
     for reason, names in forced_groups(header, data, force, opts.all_string):
         yield '-- 按字符串输出的列（{}）：{}\n'.format(reason, ', '.join(names))
     yield '-- 提示：内联数据仅供测试/修数，请勿直接用于生产批量导入\n'
 
-    if opts.fmt == 'insert':
-        yield 'INSERT INTO {} ({}) VALUES\n'.format(dia.quote_ident(opts.table), cols)
-        total = len(data)
-        for start in range(0, total, opts.batch_size):
-            chunk = data[start:start + opts.batch_size]
-            body = ',\n'.join('(' + render_row(header, r, force, opts, with_alias=False) + ')'
-                              for r in chunk)
-            last = start + len(chunk) >= total
-            yield body + (';\n' if last else ';\n\nINSERT INTO {} ({}) VALUES\n'.format(
-                dia.quote_ident(opts.table), cols))
-        return
 
+def _render_union(header: Sequence[object], data: Sequence[Sequence[object]],
+                  force: Sequence[bool], opts: SqlOptions) -> Iterator[str]:
+    """每行一条 SELECT 再用 UNION ALL 串起来，可选 CTE 包裹。"""
+    dia = opts.dialect
     lines = ['SELECT ' + render_row(header, r, force, opts) + dia.dual for r in data]
     if opts.wrap == 'plain':
         yield '\nUNION ALL\n'.join(lines) + '\n'
@@ -264,6 +255,52 @@ def _render(header: Sequence[object], data: Sequence[Sequence[object]],
         yield 'WITH {} AS (\n'.format(dia.quote_ident(opts.table))
         yield '\nUNION ALL\n'.join(lines)
         yield '\n)\nSELECT * FROM {};\n'.format(dia.quote_ident(opts.table))
+
+
+def _render_insert(header: Sequence[object], data: Sequence[Sequence[object]],
+                   force: Sequence[bool], opts: SqlOptions) -> Iterator[str]:
+    """INSERT INTO ... VALUES (...), (...)；超过 batch_size 就另起一条语句。"""
+    dia = opts.dialect
+    cols = ', '.join(dia.quote_ident(h) for h in header)
+    yield 'INSERT INTO {} ({}) VALUES\n'.format(dia.quote_ident(opts.table), cols)
+    total = len(data)
+    for start in range(0, total, opts.batch_size):
+        chunk = data[start:start + opts.batch_size]
+        body = ',\n'.join('(' + render_row(header, r, force, opts, with_alias=False) + ')'
+                          for r in chunk)
+        last = start + len(chunk) >= total
+        yield body + (';\n' if last else ';\n\nINSERT INTO {} ({}) VALUES\n'.format(
+            dia.quote_ident(opts.table), cols))
+
+
+# 渲染器注册表 —— 与 dialects.DIALECTS 同构：加一种**输出写法** = 加一个函数 + 注册一行，
+# 不必再进 _render 的中段改分支。
+#
+# 注意 format 只管「同一种 SQL 文本的不同写法」。要换**输出载体**（json/yaml）或
+# **产品形态**（ddl/orm）属于新能力，那些渲染器的入参协议与本表不同（ddl/orm 还需要
+# 列类型与约束的来源），不该塞进这里污染 --format 的语义。
+#
+# 演进路径：出现第三种写法、或 _render 里的分支超过 3 处时，再拆成 renderers/ 独立模块；
+# 届时按「载体」建目录（sql/、json/），而不是按「写法」平铺。
+SqlRenderer = Callable[
+    [Sequence[object], Sequence[Sequence[object]], Sequence[bool], SqlOptions],
+    Iterator[str],
+]
+
+RENDERERS: Dict[str, SqlRenderer] = {
+    'union': _render_union,
+    'insert': _render_insert,
+}
+
+if tuple(RENDERERS) != FORMATS:      # 注册表与声明的格式清单不得漂移
+    raise RuntimeError('RENDERERS 与 FORMATS 不一致：{}'.format(tuple(RENDERERS)))
+
+
+def _render(header: Sequence[object], data: Sequence[Sequence[object]],
+            force: Sequence[bool], opts: SqlOptions) -> Iterator[str]:
+    """公共头注释 + 分派到 opts.fmt 对应的渲染器。"""
+    yield from _header_comments(header, data, force, opts)
+    yield from RENDERERS[opts.fmt](header, data, force, opts)
 
 
 def build_sql(header: Sequence[object], rows: Sequence[Sequence[object]], opts: SqlOptions) -> str:
