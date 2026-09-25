@@ -109,8 +109,10 @@ class TestMultiline(unittest.TestCase):
         self.assertIn("SELECT N'上海市' + CHAR(10) + N'浦东新区' AS [t]", sql)
 
     def test_mysql_concat(self):
+        # MySQL 必须带 USING utf8mb4：裸 CHAR(10) 是二进制串，
+        # 会让 CONCAT 的结果整列变成 varbinary（CTAS 时列类型/字符集全错）
         sql = build_sql(['t'], [['上海市\n浦东新区']], opts(dialect=dialects.MYSQL))
-        self.assertIn("SELECT CONCAT('上海市', CHAR(10), '浦东新区') AS `t`", sql)
+        self.assertIn("SELECT CONCAT('上海市', CHAR(10 USING utf8mb4), '浦东新区') AS `t`", sql)
 
     def test_oracle_chr(self):
         sql = build_sql(['t'], [['上海市\n浦东新区']], opts(dialect=dialects.ORACLE))
@@ -210,8 +212,23 @@ class TestRowsAndErrors(unittest.TestCase):
             opts(fmt='update')
 
     def test_header_comment_lists_forced_columns(self):
+        # 整列都是文本 -> 归因"源数据是文本"（CSV 的典型情形）
         sql = build_sql(['文字', '数字'], [['a', 1]], opts())
-        self.assertIn('混类型列统一为字符串：文字', sql)
+        self.assertIn('按字符串输出的列（源数据是文本（CSV 无类型信息））：文字', sql)
+
+    def test_header_comment_says_mixed_when_column_has_both(self):
+        # 同列既有文本又有数字 -> 归因"同列混类型"（工具被迫统一的那档）
+        sql = build_sql(['混'], [['a'], [2]], opts())
+        self.assertIn('同列混有数字/日期与文本，整列统一为字符串）：混', sql)
+
+    def test_header_comment_says_user_asked_for_all_string(self):
+        # 用户显式要求 -> 单独一档，不再与"工具被迫"混为一谈
+        sql = build_sql(['数字'], [[1]], opts(all_string=True))
+        self.assertIn('按字符串输出的列（用户指定 --all-string）：数字', sql)
+
+    def test_no_comment_when_nothing_forced(self):
+        sql = build_sql(['数字'], [[1]], opts())
+        self.assertNotIn('按字符串输出的列', sql)
 
 
 class TestWrite(unittest.TestCase):
