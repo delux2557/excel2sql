@@ -41,5 +41,12 @@ jobs:
           excel2sql examples/superstore-sample.csv -o build/sample-ora.sql -d oracle
 
       - name: Show generated head
+        # Windows 上 stdout 走管道时用的是 ANSI 码页（en-US runner 即 cp1252），
+        # 直接 print 含中文的 SQL 会抛 UnicodeEncodeError 让步骤红 ——
+        # 这一步纯粹是给人看的演示，显式指定 UTF-8。
+        # 注意：不要提到 job 级别，否则会掩盖工具自身在 Windows 管道下的编码问题
+        # （那个由 excel2sql 的 cli.setup_console() + TestConsoleEncoding 负责）。
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
           python -c "print(''.join(open('build/sample.sql', encoding='utf-8').readlines()[:8]))"
