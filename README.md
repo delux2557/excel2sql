@@ -73,7 +73,7 @@ excel2sql
 
 ```
 ==========================================================
-  excel2sql 0.3.1  |  Excel / CSV  ->  硬编码 SQL
+  excel2sql 0.3.2  |  Excel / CSV  ->  硬编码 SQL
 ==========================================================
 配置：使用内置默认值（sqlserver / union / cte / 表名 HARDCODE）
 提示：在数据目录放一个 excel2sql.ini 就能固化方言/格式/输出目录等设置。
@@ -142,12 +142,14 @@ excel2sql data.csv --header-row 2 --delimiter ";" -o out.sql
 | `--table NAME` | 内联表名 |
 | `--empty-as-null` / `--no-empty-as-null` | 空字符串是否按 `NULL` 输出 |
 | `--all-string` / `--no-all-string` | 是否所有列强制按字符串输出 |
+| `--infer-types` / `--no-infer-types` | CSV 等无类型信息的输入：整列都是数字时按数字输出（默认关，见[类型与空值规则](#类型与空值规则)） |
 | `--copy-clipboard` / `--no-copy-clipboard` | 生成后是否复制到剪贴板 |
 | `--batch-size N` | `insert` 模式每批行数 |
 | `--encoding ENC` | 输出文件编码，如 `utf-8-sig`（老版 SSMS 中文乱码时用） |
 | `--input-encoding ENC` | CSV 输入编码，默认自动尝试 `utf-8-sig → gb18030 → utf-8 → gbk` |
 | `--delimiter CHAR` | CSV 分隔符，默认在 `, ; \t \|` 中自动选切分最细的 |
 | `--force` | 非交互模式下，表头不规范也自动修复并继续 |
+| `--strict-header` | 要求表头必须在第 1 行；自动识别若需跳过行则以退出码 `2` 报错（供脚本 / CI fail fast） |
 | `--config PATH` | 指定配置文件 |
 | `--init-config` | 在当前目录生成 `excel2sql.ini` 模板后退出 |
 | `-V, --version` | 版本号 |
@@ -234,8 +236,12 @@ SELECT '上海市' || CHR(10) || '浦东新区' AS "收货地址"     -- Oracle 
 | 布尔 | `'1'` / `'0'` |
 | **同列混有数字和字符串** | 整列按字符串输出（避免 `UNION ALL` 类型冲突） |
 | 加了 `--all-string` | 所有非空值都按字符串输出 |
+| **CSV 输入** | CSV 没有类型信息，读出来全是文本 → **所有列都按字符串输出**；需要数字语义请加 `--infer-types` |
+| 加了 `--infer-types` | **整列都是数字文本**的列按数字输出；带前导零（`'007'`）、`NaN`/`inf`、混有非数字的列一律保持文本 |
 
 > 为什么必须做列级统一：SQL Server 会按数据类型优先级把 `nvarchar` 隐式转成 `int`，于是 `'t'` 报 `Conversion failed`、`7900454710` 直接算术溢出。
+>
+> 反过来说，**被字符串化的列在三库里都算不了数**：实测 `SUM()` 在 SQL Server 报 `Msg 8117 Operand data type nvarchar is invalid for sum operator`、PostgreSQL 报 `function sum(text) does not exist`（MySQL 会隐式转换且结果正确）。所以 CSV 输入若要做数值统计，请开 `--infer-types`，或先用 xlsx。
 
 ## 各方言差异
 
@@ -246,9 +252,21 @@ SELECT '上海市' || CHR(10) || '浦东新区' AS "收货地址"     -- Oracle 
 | 单引号转义 | `''` | `''` | `''` | `''` |
 | 反斜杠 | 无特殊含义 | **额外转义为 `\\`** | 无特殊含义 | 无特殊含义 |
 | 拼接 | `+` | `CONCAT(...)` | `\|\|` | `\|\|` |
-| 换行 | `CHAR(10)` | `CHAR(10)` | `CHR(10)` | `CHR(10)` |
+| 换行 | `CHAR(10)` | `CHAR(10 USING utf8mb4)` | `CHR(10)` | `CHR(10)` |
 | 日期 | 隐式转换 | 隐式转换 | `TO_DATE(...)` | 隐式转换 |
 | 无表查询 | 不需要 `FROM` | 不需要 | `FROM dual` | 不需要 |
+
+## 落地到数据库时的两点注意
+
+产物是**纯 `SELECT` / `INSERT` 文本**，本身不带类型声明：
+
+- **`union` 产物是裸 `SELECT`**。用 `SELECT * INTO`（SQL Server）/ `CREATE TABLE AS`（PG、MySQL）
+  让数据库**从字面量推类型**时，日期列只会落成字符串类型（SS `nvarchar`、PG `text`、MySQL `varchar`），
+  数字列也取决于字面量（CSV 不开 `--infer-types` 会落成文本）。**正式建表请自己写 `CREATE TABLE`**，
+  再用 `insert` 产物灌数据 —— 实测这样三库都能无损接受。
+- **MySQL 执行端要显式指定字符集**。`docker exec` 或任何非交互会话里，MySQL 客户端默认用 `latin1`，
+  中文和 emoji 会**按字节**落进 `latin1` 列（`CHAR_LENGTH('📦🚚✅')` 返回 11 而不是 3）。
+  执行产物前先 `SET NAMES utf8mb4;`，或给客户端加 `--default-character-set=utf8mb4`。
 
 ## 表头体检
 
@@ -258,6 +276,16 @@ SELECT '上海市' || CHR(10) || '浦东新区' AS "收货地址"     -- Oracle 
 - 列名重复（大小写不敏感）→ 自动加 `_2`、`_3` 后缀，且保证结果全局唯一
 - 表头行**全是数字或日期** → 高度怀疑表头不在这一行，请改 `--header-row N`
 - 表头下方**没有任何数据行** → 直接判定无法转换
+
+**自动识别表头时的两道保护**（防止把数据行当表头、静默丢一行）：
+
+- 候选行与第 1 行**分差过小**（< 0.3）时保守选第 1 行。表头里只要有一个空列名，该行得分就会掉
+  `0.5×0.5=0.25`，而"位置靠前"的偏好只有 `0.05/行` —— 证据不足时不该翻盘。
+- **被跳过的行只要不止一个非空格就不跳**。标题/说明行总是稀疏的（往往只有第一格有内容），
+  而"表头被误判成标题"的那种行是填满的。实测表头 `装运方式 | 2024` 得分 1.75 vs 数据行 3.95，
+  分差 2.2，单靠阈值拦不住，靠的就是这条。
+
+两条都会在提示里说明原因，并给出 `--header-row N` 的修正建议。脚本 / CI 里想更严格就用 `--strict-header`。
 
 ## 安全说明
 
@@ -286,10 +314,11 @@ SELECT '上海市' || CHR(10) || '浦东新区' AS "收货地址"     -- Oracle 
 │   ├── sqlgen.py           # 字面量渲染与 SQL 生成
 │   ├── dialects.py         # 各方言规则
 │   └── clipboard.py        # 跨平台剪贴板
-├── tests/                  # pytest / unittest 均可跑
+├── tests/                  # pytest / unittest 均可跑（含 test_regressions.py 回归集）
 ├── examples/               # 示例数据（可直接喂给 CLI）
 ├── docs/
 │   ├── reviews/            # 代码评审记录
+│   ├── testing/            # 端到端实测：方法、问题清单、最小复现、避坑清单
 │   └── legacy/             # 0.1.0 单文件脚本归档
 ├── excel2sql.bat           # Windows 双击启动（自动探测 python）
 ├── excel2sql.ini.example   # 配置文件模板（复制成 excel2sql.ini 即生效）
@@ -317,6 +346,8 @@ python -m pytest                  # 或 python -m unittest discover -s tests
 ## 变更记录
 
 见 [CHANGELOG.md](CHANGELOG.md)。0.2.0 相对 0.1.0 的完整改动与评审来源见 [docs/reviews/review-01-代码评审.md](docs/reviews/review-01-代码评审.md)。
+
+0.3.2 那批问题的来源、**可粘贴的最小复现**与真库验证方法见 [docs/testing/e2e-testing.md](docs/testing/e2e-testing.md)。
 
 ## 许可
 
