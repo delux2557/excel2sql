@@ -7,13 +7,15 @@ from __future__ import annotations
 import datetime
 import re
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import List, Sequence, Tuple
 
 _NUMBER_RE = re.compile(r'-?\d+(\.\d+)?')
 _DATE_RE = re.compile(r'\d{4}[-/]\d{1,2}[-/]\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?)?')
 
 # 表头行里"看起来像数据"的判断上限：超过这个比例就认为表头不在该行
 LIKE_DATA_RATIO = 1.0
+# 自动识别表头时，低于这个分数就认为没有明显表头（纯数字行大约只有 1.0 分）
+MIN_SCORE = 1.5
 
 
 def is_blank(v) -> bool:
@@ -55,6 +57,51 @@ def repair(names: Sequence[object]) -> List[str]:
         seen.add(name.lower())
         out.append(name)
     return out
+
+
+def score_header_row(row: Sequence[object], next_row: Sequence[object]) -> float:
+    """给"这一行像不像表头"打分：越高越像。
+
+    表头的典型特征：几乎全是文本、互不重复、下方紧跟数据行；
+    数据行则相反（数字/日期占比高）。
+    """
+    cells = [v for v in row if not is_blank(v)]
+    if not cells:
+        return -10.0
+
+    filled = len(cells) / max(1, len(row))
+    value_like = sum(1 for v in cells if looks_like_value(v)) / len(cells)
+    text_like = 1.0 - value_like
+    unique = len({str(v).strip().lower() for v in cells}) / len(cells)
+    short = sum(1 for v in cells if isinstance(v, str) and 0 < len(v) <= 40) / len(cells)
+
+    below = [v for v in next_row if not is_blank(v)] if next_row else []
+    next_is_data = (sum(1 for v in below if looks_like_value(v)) / len(below)) if below else 0.0
+
+    return (2.0 * text_like + 1.0 * unique + 0.5 * short
+            + 1.5 * next_is_data + 0.5 * filled - 2.0 * value_like)
+
+
+def detect(rows: Sequence[Sequence[object]], max_scan: int = 15) -> Tuple[int, str]:
+    """自动识别表头行。
+
+    返回 (1 基行号, 说明)。识别不出来时退回第 1 行并说明原因。
+    位置越靠前越受偏好，避免把中间某行数据误判成表头。
+    """
+    if not rows:
+        return 1, '工作表为空'
+    limit = min(len(rows), max(1, max_scan))
+    best_row, best_score = 1, None
+    for idx in range(limit):
+        nxt = rows[idx + 1] if idx + 1 < len(rows) else []
+        score = score_header_row(rows[idx], nxt) - 0.05 * idx
+        if best_score is None or score > best_score:
+            best_row, best_score = idx + 1, score
+    if best_score is None or best_score < MIN_SCORE:
+        return 1, '没有明显像表头的行（前 {} 行都更像数据），默认第 1 行'.format(limit)
+    if best_row == 1:
+        return 1, '第 1 行最像表头（文本列名 + 下方是数据）'
+    return best_row, '跳过前 {} 行，第 {} 行最像表头'.format(best_row - 1, best_row)
 
 
 def check(names: Sequence[object], data_rows: Sequence[Sequence[object]]) -> HeaderCheck:

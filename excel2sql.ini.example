@@ -1,0 +1,46 @@
+# excel2sql 配置文件
+#
+# 位置（任选其一，靠前的优先）：
+#   1) 与数据同目录的 excel2sql.ini      —— 项目级
+#   2) ~/.excel2sql/config.ini           —— 用户级
+# 命令行参数优先级最高，会覆盖本文件。
+# 布尔值写 true / false。
+
+[output]
+# 目标数据库方言: sqlserver | mysql | oracle | postgresql
+dialect = sqlserver
+# 输出格式: union = UNION ALL 内联表, insert = INSERT INTO ... VALUES
+format = union
+# union 模式: cte = 外面包 WITH ... AS (...), plain = 纯 UNION ALL 块
+wrap = cte
+# 内联表名
+table = HARDCODE
+# insert 模式每批行数
+batch_size = 500
+
+# 输出到哪里:
+#   source = 与源文件同目录
+#   sub    = 源文件目录下新建子目录（名字见 output_subdir）
+#   <路径> = 指定目录（相对路径按源文件目录解析）
+output_dir = sub
+output_subdir = excel2sql-out
+# 同名文件已存在时: false = 自动加 -2/-3 后缀, true = 直接覆盖
+overwrite = false
+# 输出文件编码: utf-8 | utf-8-sig（老版 SSMS 中文乱码时用后者）
+encoding = utf-8
+# 输出文件名，可用占位符 {name} 源文件名, {sheet} 工作表名, {date} 当天日期
+filename = {name}_{sheet}_hardcode.sql
+
+[data]
+# 空字符串是否当成 NULL
+empty_as_null = false
+# 所有列强制按字符串输出
+all_string = false
+# 表头行号: auto = 自动识别（交互里会打印预览让你确认）, 或写 1 / 2 / ...
+header_row = auto
+
+[ui]
+# true = 交互时逐项询问方言/格式/表名/编码/剪贴板；false = 直接用本文件设置
+ask_advanced = false
+# 生成后自动复制到剪贴板
+copy_clipboard = false

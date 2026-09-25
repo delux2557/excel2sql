@@ -160,10 +160,10 @@ def _render(header: Sequence[object], data: Sequence[Sequence[object]],
 
     lines = ['SELECT ' + render_row(header, r, force, opts) + dia.dual for r in data]
     if opts.wrap == 'plain':
-        yield 'UNION ALL\n'.join(lines) + '\n'
+        yield '\nUNION ALL\n'.join(lines) + '\n'
     else:
         yield 'WITH {} AS (\n'.format(dia.quote_ident(opts.table))
-        yield 'UNION ALL\n'.join(lines)
+        yield '\nUNION ALL\n'.join(lines)
         yield '\n)\nSELECT * FROM {};\n'.format(dia.quote_ident(opts.table))
 
 

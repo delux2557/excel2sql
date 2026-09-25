@@ -149,6 +149,21 @@ class TestFormats(unittest.TestCase):
         sql = build_sql(['a'], [[i] for i in range(5)], opts())
         self.assertEqual(sql.count('UNION ALL'), 4)
 
+    def test_union_all_on_its_own_line(self):
+        """UNION ALL 必须独立成行：与上一行粘连会造出 [a]UNION 这类坏 token。"""
+        sql = build_sql(['a'], [[1], [2]], opts())
+        self.assertIn('SELECT 1 AS [a]\nUNION ALL\nSELECT 2 AS [a]', sql)
+        self.assertNotIn('UNION ALL\n', sql.replace('\nUNION ALL\n', ''))
+
+    def test_oracle_dual_not_glued_to_union(self):
+        """Oracle 下 SELECT ... FROM dual 后面紧贴 UNION ALL 会解析失败。"""
+        sql = build_sql(['a'], [[1], [2]], opts(dialect=dialects.ORACLE))
+        self.assertIn('FROM dual\nUNION ALL\n', sql)
+
+    def test_plain_wrap_union_on_own_line(self):
+        sql = build_sql(['a'], [[1], [2]], opts(wrap='plain'))
+        self.assertIn('SELECT 1 AS [a]\nUNION ALL\nSELECT 2 AS [a]', sql)
+
     def test_insert_single_batch(self):
         sql = build_sql(['a', 'b'], [[1, 'x'], [2, 'y']], opts(fmt='insert'))
         self.assertIn('INSERT INTO [HARDCODE] ([a], [b]) VALUES', sql)

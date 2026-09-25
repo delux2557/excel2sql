@@ -76,6 +76,40 @@ class TestRepair(unittest.TestCase):
         self.assertEqual(headers.repair(['  a  ', 'b']), ['a', 'b'])
 
 
+class TestDetect(unittest.TestCase):
+    """表头行自动识别（交互/批处理都用它给出行号建议）。"""
+
+    def test_header_on_first_row(self):
+        rows = [['序号', '装运方式', '数量'], [1, 'A-1', 25], [2, '二级', 30]]
+        row, reason = headers.detect(rows)
+        self.assertEqual(row, 1)
+        self.assertIn('第 1 行', reason)
+
+    def test_skips_title_and_blank_rows(self):
+        rows = [['销售报表'], [], ['行ID', '数量'], ['1', '20'], ['2', '30']]
+        row, reason = headers.detect(rows)
+        self.assertEqual(row, 3)
+        self.assertIn('第 3 行', reason)
+
+    def test_numeric_only_header_falls_back(self):
+        rows = [[1, 2, 3], [4, 5, 6]]
+        row, reason = headers.detect(rows)
+        self.assertEqual(row, 1)
+        self.assertIn('默认第 1 行', reason)
+
+    def test_empty_sheet(self):
+        self.assertEqual(headers.detect([])[0], 1)
+
+    def test_score_prefers_text_with_data_below(self):
+        header = ['订单号', '客户', '金额']
+        data = ['CA-2014-1', '张三', 100.5]
+        self.assertGreater(headers.score_header_row(header, data),
+                           headers.score_header_row(data, ['CA-2014-2', '李四', 88.0]))
+
+    def test_score_blank_row_is_very_low(self):
+        self.assertLess(headers.score_header_row([None, None], ['a', 'b']), 0)
+
+
 class TestLooksLikeValue(unittest.TestCase):
     def test_numbers_and_dates(self):
         self.assertTrue(headers.looks_like_value(12))

@@ -29,6 +29,7 @@ python-path.txt
 # 生成的 SQL 与中间结果不入库（可复现即可）
 *_hardcode.sql
 out.sql
+excel2sql-out/
 
 # --- 本地素材（体积大，不入库；放到 示例数据/ 自行取用）---
 示例数据/

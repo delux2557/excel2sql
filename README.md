@@ -9,7 +9,10 @@
 
 ## 特性
 
-- **交互式向导**：自动扫描当前目录 → 编号选文件 / 选 sheet → 表头校验 → 选方言 → 生成，全程有默认值可回车
+- **交互式向导**：自动扫描当前目录 → 选文件 → 选 sheet → 表头确认 → 生成。只有一个文件/一个 sheet 时自动跳过，
+  表头行自动识别并打印预览，全程基本只需按回车
+- **配置文件**（ssh config 风格）：方言、输出格式、输出目录、编码、空串策略、剪贴板等写进 `excel2sql.ini`，
+  交互时不再逐项询问；命令行参数可临时覆盖
 - **完全非交互模式**：给定文件参数后不再有任何 `input()`，可安全用于批处理与 CI
 - **多方言**：SQL Server / MySQL / Oracle / PostgreSQL，标识符引用、字符串转义、日期包装、换行拼接各不相同
 - **表头体检**：识别空列名、重复列名、"表头其实是数据行"，可自动修复（`col_N` / `_2` 后缀）
@@ -48,7 +51,7 @@ python -c "import sys,runpy; sys.path.insert(0, r'<仓库路径>\src'); runpy.ru
 3. 仓库内的 `.venv\Scripts\python.exe`
 4. `PATH` 里的 `python`（自动跳过 Microsoft Store 的占位程序）
 5. `py -3` 启动器
-6. 常见安装位置：`%LOCALAPPDATA%\Programs\Python\Python3*`、`%ProgramFiles%\Python3*`、`C:\Python3*`、`C:\Python3*`、`C:\Python3*`
+6. 常见安装位置：`%LOCALAPPDATA%\Programs\Python\Python310`~`313`、`C:\Python311`/`C:\Python312`、`C:\Python312\python-3.12.10-embed-amd64`
 
 如果都找不到（或版本低于 3.9），窗口里会给出具体解决办法。**最省事的办法**是在仓库根建一个 `python-path.txt`：
 
@@ -69,34 +72,35 @@ excel2sql
 ```
 
 ```
-============================================================
-  excel2sql  |  Excel / CSV  ->  硬编码 SQL（UNION ALL / INSERT）
-============================================================
+==========================================================
+  excel2sql 0.3.0  |  Excel / CSV  ->  硬编码 SQL
+==========================================================
+配置：使用内置默认值（sqlserver / union / cte / 表名 HARDCODE）
+提示：在数据目录放一个 excel2sql.ini 就能固化方言/格式/输出目录等设置。
 
-发现 3 个文件（目录：D:\data）
-   1. 订单明细.xlsx   (1,204 KB)
-   2. superstore-sample.csv   (8 KB)
-   3. 参数表.csv   (2 KB)
-输入编号 或直接粘贴路径 (q 退出): 2
+发现 1 个文件（目录：D:\data）
+  superstore-sample.csv   (8 KB)  （回车直接使用）
+回车继续，或粘贴其它路径，q 退出:
+
 读取：D:\data\superstore-sample.csv
-  唯一 sheet：superstore-sample
-表头在第几行 [1]:
+  唯一 sheet：superstore-sample  (31 行 x 24 列)，自动使用
+  表头识别：第 1 行最像表头（文本列名 + 下方是数据）
+
+表头预览（← 标记的是当前选中的表头行）：
+     1 | 行 ID | 订单 ID | 订购日期 | …                 ← 表头
+     2 | 40098 | CA-2014-AB1001… | 2024-11-11 00:… |
+     3 | 26341 | IN-2014-JR1621… | 2024-02-05 00:… |
+回车确认，或输入其它行号修正 [1]:
   表头校验通过：24 列 / 30 行数据
 
-SQL 方言： 1=SQL Server   2=MySQL   3=Oracle   4=PostgreSQL
-选择 [1]:
-
-输出形式  1=CTE 包裹(可直接跑)  2=纯 UNION ALL 块  3=INSERT INTO ... VALUES [1]:
-内联表名 [HARDCODE]:
-空字符串按 NULL 处理？y/N [N]:
-
-输出文件路径 [D:\data\superstore-sample_superstore_sample_hardcode.sql]:
-文件编码（SSMS 老版本中文乱码时用 utf-8-sig） [utf-8]:
-
-[OK] 30 行 x 24 列 -> D:\data\superstore-sample_superstore_sample_hardcode.sql   (24 KB)
+[OK] 30 行 x 24 列 -> D:\data\excel2sql-out\superstore-sample_superstore_sample_hardcode.sql   (24 KB)
 预览：
   SELECT N'40098' AS [行 ID], N'CA-2014-AB10015140-41954' AS [订单 ID], N'2024-11-11 00:00:00' AS [订购日期], ...
 ```
+
+**能自动推断的都不问**：目录里只有一个文件时回车即用、工作簿只有一个 sheet 时自动选择、表头行自动识别并给预览。
+方言、输出格式、表名、编码、输出目录这些**由配置文件决定**（见[配置文件](#配置文件)），
+需要临时改就用命令行参数（例如 `excel2sql -d mysql`）。
 
 ### 非交互（脚本 / CI）
 
@@ -116,26 +120,69 @@ excel2sql data.csv --header-row 2 --delimiter ";" -o out.sql
 
 ## 命令行参数
 
+不带参数时默认值来自[配置文件](#配置文件)；**命令行参数优先级最高**，可临时覆盖。
+
 | 参数 | 说明 |
 |---|---|
 | `FILE` | 源文件；**省略则进入交互向导** |
 | `-s, --sheet NAME` | 工作表名（多 sheet 时必填，否则报错并列出可选值） |
-| `-o, --out PATH` | 输出路径，默认 `<文件名>_<sheet>_hardcode.sql` |
-| `-d, --dialect NAME` | `sqlserver`(默认) / `mysql` / `oracle` / `postgresql`，也可用 `1`~`4` |
-| `--header-row N` | 表头行号，从 1 开始，默认 1 |
-| `--format union\|insert` | 输出格式，默认 `union` |
-| `--wrap cte\|plain` | `union` 模式下是否用 `WITH ... AS (...)` 包裹，默认 `cte` |
-| `--table NAME` | 内联表名，默认 `HARDCODE` |
-| `--empty-as-null` | 空字符串按 `NULL` 输出 |
-| `--all-string` | 所有列强制按字符串输出 |
-| `--batch-size N` | `insert` 模式每批行数，默认 500 |
-| `--encoding ENC` | 输出文件编码，默认 `utf-8`（老版 SSMS 用 `utf-8-sig`） |
+| `-o, --out PATH` | 输出路径；**显式指定则按原样写入**（可覆盖），不指定则按配置的 `output_dir` 生成并防冲突 |
+| `-d, --dialect NAME` | `sqlserver` / `mysql` / `oracle` / `postgresql`，也可用 `1`~`4` |
+| `--header-row N` | 表头行号；`auto`（默认）表示自动识别 |
+| `--format union\|insert` | 输出格式 |
+| `--wrap cte\|plain` | `union` 模式下是否用 `WITH ... AS (...)` 包裹 |
+| `--table NAME` | 内联表名 |
+| `--empty-as-null` / `--no-empty-as-null` | 空字符串是否按 `NULL` 输出 |
+| `--all-string` / `--no-all-string` | 是否所有列强制按字符串输出 |
+| `--copy-clipboard` / `--no-copy-clipboard` | 生成后是否复制到剪贴板 |
+| `--batch-size N` | `insert` 模式每批行数 |
+| `--encoding ENC` | 输出文件编码，如 `utf-8-sig`（老版 SSMS 中文乱码时用） |
 | `--input-encoding ENC` | CSV 输入编码，默认自动尝试 `utf-8-sig → gb18030 → utf-8 → gbk` |
 | `--delimiter CHAR` | CSV 分隔符，默认在 `, ; \t \|` 中自动选切分最细的 |
 | `--force` | 非交互模式下，表头不规范也自动修复并继续 |
+| `--config PATH` | 指定配置文件 |
+| `--init-config` | 在当前目录生成 `excel2sql.ini` 模板后退出 |
 | `-V, --version` | 版本号 |
 
 **退出码**：`0` 成功；`1` 一般错误（读不到文件、sheet 不存在、参数非法）；`2` 表头不规范且未加 `--force`。
+
+## 配置文件
+
+把"不用每次选"的东西固化下来，写法和 ssh config 一样是纯文本键值：
+
+```bash
+excel2sql --init-config          # 生成带注释的模板 excel2sql.ini
+```
+
+查找顺序（找到即用）：`--config` 指定 → `./excel2sql.ini`（数据目录，项目级）→ `~/.excel2sql/config.ini`（用户级）→ 内置默认值。
+
+```ini
+[output]
+dialect = mysql                 # sqlserver | mysql | oracle | postgresql
+format = union                  # union | insert
+wrap = cte                      # cte | plain
+table = HARDCODE
+batch_size = 500
+output_dir = sub                # source=同目录 | sub=源目录下建子目录 | 任意路径
+output_subdir = excel2sql-out
+overwrite = false               # false = 同名自动加 -2/-3 后缀
+encoding = utf-8                # utf-8 | utf-8-sig
+filename = {name}_{sheet}_hardcode.sql   # 可用 {name} {sheet} {date}
+
+[data]
+empty_as_null = false
+all_string = false
+header_row = auto               # auto = 自动识别，或写 1 / 2 / ...
+
+[ui]
+ask_advanced = false            # true = 交互时逐项询问方言/格式/编码/剪贴板
+copy_clipboard = false
+```
+
+- 配置写错不会中断：无法解析的项会打印一条 `[配置] ...` 警告，并回退到默认值
+- 键名多余或未知会被忽略，方便把同一份 ini 在不同版本间复用
+- `ask_advanced = true` 时才逐项询问，适合想每次手动确认的场景
+- 完整示例见 [`excel2sql.ini.example`](excel2sql.ini.example)
 
 ## 输出格式
 
@@ -224,8 +271,9 @@ SELECT '上海市' || CHR(10) || '浦东新区' AS "收货地址"     -- Oracle 
 .
 ├── src/excel2sql/          # 包源码
 │   ├── cli.py              # 命令行入口：交互向导 + 批处理
+│   ├── config.py           # excel2sql.ini 配置读写与输出路径防冲突
 │   ├── reader.py           # Excel/CSV 读取与编码、分隔符探测
-│   ├── headers.py          # 表头校验与修复
+│   ├── headers.py          # 表头识别、校验与修复
 │   ├── sqlgen.py           # 字面量渲染与 SQL 生成
 │   ├── dialects.py         # 各方言规则
 │   └── clipboard.py        # 跨平台剪贴板
@@ -235,6 +283,7 @@ SELECT '上海市' || CHR(10) || '浦东新区' AS "收货地址"     -- Oracle 
 │   ├── reviews/            # 代码评审记录
 │   └── legacy/             # 0.1.0 单文件脚本归档
 ├── excel2sql.bat           # Windows 双击启动（自动探测 python）
+├── excel2sql.ini.example   # 配置文件模板（复制成 excel2sql.ini 即生效）
 ├── LICENSE                 # MIT
 ├── python-path.txt         # 可选：本机 python 路径（已 gitignore）
 └── pyproject.toml

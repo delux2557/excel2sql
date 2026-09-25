@@ -1,36 +1,46 @@
-"""命令行入口：交互式向导 + 可脚本化的非交互模式。"""
+"""命令行入口：交互式向导 + 可脚本化的非交互模式。
+
+交互原则（v0.3）：
+- 能自动推断的一律不问：目录里只有一个文件、工作簿只有一个 sheet
+- 表头行自动识别 + 打印预览，用户回车确认或输入行号修正
+- 方言/格式/表名/编码/输出目录/剪贴板等默认值来自 excel2sql.ini，
+  交互时不再逐项询问（除非配置 ask_advanced = true）
+"""
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 from . import __version__
 from .clipboard import copy_text
-from .dialects import DIALECTS, NUMBERED, resolve
-from .headers import check as check_header, repair
-from .reader import (ReadError, Sheet, probe_sheets, read_sheet_rows, scan_dir)
-from .sqlgen import SqlGenError, SqlOptions, UNION_ROW_WARN, build_sql, prepare, write_sql
+from .config import (ConfigError, Settings, unique_path, write_template)
+from .config import load as load_settings
+from .dialects import DIALECTS, resolve
+from .headers import check as check_header
+from .headers import detect as detect_header, is_blank, repair
+from .reader import ReadError, Sheet, probe_sheets, read_sheet_rows, scan_dir
+from .sqlgen import SqlGenError, SqlOptions, UNION_ROW_WARN, build_sql, write_sql
 
 EXIT_OK, EXIT_ERROR, EXIT_UNCLEAN = 0, 1, 2
-# 超过这个行数，硬编码 SQL 基本已经不适合，除非用户明确指定
+# 超过这个行数，硬编码 SQL 基本已经不适合
 HARD_LIMIT_ROWS = 200_000
+DIALECT_ORDER = ('sqlserver', 'mysql', 'oracle', 'postgresql')
 
 BANNER = """{sep}
-  excel2sql  |  Excel / CSV  ->  硬编码 SQL（UNION ALL / INSERT）
-{sep}""".format(sep='=' * 60)
+  excel2sql {ver}  |  Excel / CSV  ->  硬编码 SQL
+{sep}""".format(sep='=' * 58, ver=__version__)
 
 
 # ------------------------------------------------------------------ 输入助手
 def ask(prompt: str, default: str = '') -> str:
     hint = ' [{}]'.format(default) if default else ''
-    answer = input('{}{}: '.format(prompt, hint)).strip()
-    return answer or default
+    return input('{}{}: '.format(prompt, hint)).strip() or default
 
 
 def pick(items: Sequence, title: str, render, allow_path: bool = False):
-    """编号选择：返回 int 下标；allow_path 时可能返回 ('file'|'dir', 路径)。"""
+    """编号选择。返回下标；allow_path 时也可能返回 ('file'|'dir', Path)。"""
     while True:
         print('\n' + title)
         for i, it in enumerate(items, 1):
@@ -51,17 +61,131 @@ def pick(items: Sequence, title: str, render, allow_path: bool = False):
         print('  ! 请输入 1~{} 之间的编号'.format(len(items)))
 
 
-def _default_out(src: Path, sheet_name: str) -> Path:
-    import re
-    safe = re.sub(r'[^\w\u4e00-\u9fff]+', '_', str(sheet_name)).strip('_') or 'sheet'
-    return src.with_name('{}_{}_hardcode.sql'.format(src.stem, safe))
+def pick_single_or_list(items: Sequence, title: str, render, hint: str = '回车直接使用'):
+    """只有一项时不再要求输入编号，回车即用；多项时正常选择。"""
+    if len(items) == 1:
+        print('\n{}\n  {}  （{}）'.format(title, render(items[0]), hint))
+        raw = input('回车继续，或粘贴其它路径，q 退出: ').strip()
+        if raw.lower() in ('q', 'quit', 'exit'):
+            raise KeyboardInterrupt
+        if raw:
+            p = Path(raw.strip('"'))
+            if p.is_dir():
+                return ('dir', p)
+            if p.is_file():
+                return ('file', p)
+            print('  ! 路径不存在，改用 {}'.format(items[0]))
+        return 0
+    return pick(items, title, render, allow_path=True)
+
+
+def ask_dialect(default_key: str) -> str:
+    print('\nSQL 方言：')
+    for i, key in enumerate(DIALECT_ORDER, 1):
+        mark = '    ← 当前配置' if key == default_key else ''
+        print('  {}. {}{}'.format(i, DIALECTS[key].name, mark))
+    default_index = str(DIALECT_ORDER.index(default_key) + 1) if default_key in DIALECT_ORDER else '1'
+    raw = ask('选择', default_index)
+    if raw.isdigit() and 1 <= int(raw) <= len(DIALECT_ORDER):
+        return DIALECT_ORDER[int(raw) - 1]
+    return resolve(raw).key          # 也允许直接输名字，如 mysql
+
+
+def ask_format(default_fmt: str, default_wrap: str) -> Tuple[str, str]:
+    default = '3' if default_fmt == 'insert' else ('2' if default_wrap == 'plain' else '1')
+    print('\n输出形式：')
+    print('  1. CTE 包裹    WITH ... AS ( ... ) SELECT *   —— 可直接执行')
+    print('  2. 纯 UNION ALL 块                            —— 方便嵌进已有 SQL')
+    print('  3. INSERT INTO ... VALUES                     —— 行数多时更合适')
+    raw = ask('选择', default)
+    if raw == '3':
+        return 'insert', 'plain'
+    return 'union', ('plain' if raw == '2' else 'cte')
+
+
+# ------------------------------------------------------------------ 表头
+def split_header(sheet: Sheet, row_index: int) -> Tuple[Optional[List], List[List]]:
+    """按 1 基行号切出表头与数据，并裁掉右侧多余空列。"""
+    if row_index < 1 or row_index > sheet.nrows:
+        return None, []
+    header = list(sheet.rows[row_index - 1])
+    while len(header) > 1 and is_blank(header[-1]):
+        header.pop()
+    rows = [list(r[:len(header)]) for r in sheet.rows[row_index:]]
+    return header, rows
+
+
+def _cells(text_row: Sequence, limit: int = 7, width: int = 14) -> str:
+    out = []
+    for v in list(text_row)[:limit]:
+        s = '' if v is None else str(v).replace('\n', '⏎')
+        out.append(s if len(s) <= width else s[:width] + '…')
+    if len(text_row) > limit:
+        out.append('…(+{} 列)'.format(len(text_row) - limit))
+    return ' | '.join(out)
+
+
+def choose_header_row(sheet: Sheet, suggested: int) -> int:
+    """打印预览让用户确认表头行，输入行号可修正。"""
+    row = suggested if 1 <= suggested <= sheet.nrows else 1
+    while True:
+        header, rows = split_header(sheet, row)
+        print('\n表头预览（← 标记的是当前选中的表头行）：')
+        start = max(1, row - 3)
+        end = min(sheet.nrows, row + 2)
+        for i in range(start, end + 1):
+            mark = '   ← 表头' if i == row else ''
+            print('  {:>4} | {}{}'.format(i, _cells(sheet.rows[i - 1]), mark))
+        if sheet.nrows > end:
+            print('  {:>4} | …（共 {} 行）'.format('…', sheet.nrows))
+        raw = ask('回车确认，或输入其它行号修正', str(row))
+        if raw.isdigit() and 1 <= int(raw) <= sheet.nrows:
+            return int(raw)
+        print('  ! 请输入 1~{} 之间的行号'.format(sheet.nrows))
+
+
+# ------------------------------------------------------------------ 选项合并
+def merge_options(args: argparse.Namespace, settings: Settings) -> SqlOptions:
+    """命令行参数 > 配置文件 > 内置默认。"""
+    dialect = resolve(args.dialect).key if args.dialect else settings.dialect
+    fmt = args.fmt or settings.format
+    wrap = args.wrap or settings.wrap
+    empty_as_null = settings.empty_as_null if args.empty_as_null is None else args.empty_as_null
+    all_string = settings.all_string if args.all_string is None else args.all_string
+    return SqlOptions(
+        dialect=resolve(dialect),
+        table=args.table or settings.table,
+        fmt=fmt,
+        wrap=wrap if fmt == 'union' else 'plain',
+        empty_as_null=empty_as_null,
+        all_string=all_string,
+        batch_size=args.batch_size or settings.batch_size,
+    )
+
+
+def resolve_header_row(args: argparse.Namespace, settings: Settings) -> Optional[int]:
+    """返回 None 表示需要自动识别。"""
+    raw = args.header_row if args.header_row is not None else settings.header_row
+    if raw is None:
+        return None
+    raw = str(raw).strip().lower()
+    if raw in ('auto', '', 'none'):
+        return None
+    if raw.isdigit() and int(raw) >= 1:
+        return int(raw)
+    raise ConfigError('header_row / --header-row 只能是 auto 或 >=1 的行号，收到：{}'.format(raw))
 
 
 # ------------------------------------------------------------------ 交互流程
-def interactive(opts: argparse.Namespace) -> int:
-    cwd = Path.cwd()
+def interactive(args: argparse.Namespace, settings: Settings, config_path) -> int:
     print(BANNER)
+    print('配置：{}'.format('{}  （{}）'.format(config_path, settings.progress_hint())
+                          if config_path else '使用内置默认值（{}）'.format(settings.progress_hint())))
+    if config_path is None:
+        print('提示：在数据目录放一个 excel2sql.ini 就能固化方言/格式/输出目录等设置。')
 
+    # 1) 选文件
+    cwd = Path.cwd()
     files = scan_dir(cwd)
     while not files:
         print('\n当前目录没有 Excel/CSV：{}'.format(cwd))
@@ -74,9 +198,9 @@ def interactive(opts: argparse.Namespace) -> int:
             continue
         cwd, files = d, scan_dir(d)
 
-    choice = pick(files, '发现 {} 个文件（目录：{}）'.format(len(files), cwd),
-                  lambda p: '{}   ({:,} KB)'.format(p.name, p.stat().st_size // 1024),
-                  allow_path=True)
+    choice = pick_single_or_list(
+        files, '发现 {} 个文件（目录：{}）'.format(len(files), cwd),
+        lambda p: '{}   ({:,} KB)'.format(p.name, p.stat().st_size // 1024))
     if isinstance(choice, tuple):
         kind, path = choice
         if kind == 'dir':
@@ -84,39 +208,52 @@ def interactive(opts: argparse.Namespace) -> int:
             if not sub:
                 print('该目录下没有 Excel/CSV：{}'.format(path))
                 return EXIT_ERROR
-            target = sub[pick(sub, '目录：{}'.format(path), lambda p: p.name)]
+            target = sub[pick_single_or_list(sub, '目录：{}'.format(path), lambda p: p.name)]
         else:
             target = path
     else:
         target = files[choice]
 
+    # 2) 选 sheet（只有一个时自动使用）
     print('\n读取：{}'.format(target))
     try:
-        infos = probe_sheets(target)                    # 只读元信息，大表也很快
+        infos = probe_sheets(target)
     except ReadError as e:
         print('读取失败：{}'.format(e))
         return EXIT_ERROR
 
     if len(infos) == 1:
         sheet_name = infos[0].name
-        print('  唯一 sheet：{}  ({})'.format(sheet_name, infos[0].shape_text()))
+        print('  唯一 sheet：{}  ({})，自动使用'.format(sheet_name, infos[0].shape_text()))
     else:
         sheet_name = infos[pick(infos, '共 {} 个 sheet，请选择'.format(len(infos)),
                                 lambda s: '{}   ({})'.format(s.name, s.shape_text()))].name
 
     print('  读取数据中…（几万行的 Excel 可能要十几秒）')
     try:
-        sheet = read_sheet_rows(target, sheet_name, delimiter=opts.delimiter)
+        sheet = read_sheet_rows(target, sheet_name, delimiter=args.delimiter)
     except ReadError as e:
         print('读取失败：{}'.format(e))
         return EXIT_ERROR
 
-    row = opts.header_row
-    raw = ask('表头在第几行', str(row))
-    row = int(raw) if raw.isdigit() and int(raw) >= 1 else row
-    header, rows = split_header(sheet, row)
+    # 3) 表头行：自动识别 + 预览确认
+    try:
+        wanted = resolve_header_row(args, settings)
+    except ConfigError as e:
+        print('配置错误：{}'.format(e))
+        return EXIT_ERROR
+
+    if wanted:
+        header_row = wanted
+        print('  表头行：使用配置/参数指定的第 {} 行'.format(header_row))
+    else:
+        suggested, reason = detect_header(sheet.rows)
+        print('  表头识别：{}'.format(reason))
+        header_row = choose_header_row(sheet, suggested)
+
+    header, rows = split_header(sheet, header_row)
     if header is None:
-        print('表头行 {} 超出范围（该表仅 {} 行），无法转换'.format(row, sheet.nrows))
+        print('表头行 {} 超出范围（该表仅 {} 行），无法转换'.format(header_row, sheet.nrows))
         return EXIT_ERROR
 
     verdict = check_header(header, rows)
@@ -134,57 +271,67 @@ def interactive(opts: argparse.Namespace) -> int:
             return EXIT_OK
         header = repair(header)
 
-    print('\nSQL 方言： ' + '   '.join('{}={}'.format(k, DIALECTS[k].name)
-                                     for k in ('sqlserver', 'mysql', 'oracle', 'postgresql')))
-    dialect = resolve(ask('选择', '1') or '1')
+    # 4) 输出选项：默认全部取配置，只有 ask_advanced 时才逐项询问
+    if settings.ask_advanced:
+        settings.dialect = ask_dialect(settings.dialect)
+        settings.format, settings.wrap = ask_format(settings.format, settings.wrap)
+        settings.table = ask('内联表名', settings.table) or settings.table
+        settings.empty_as_null = ask('空字符串按 NULL 处理？y/N',
+                                     'y' if settings.empty_as_null else 'N').lower() == 'y'
+        settings.encoding = ask('输出编码（老版 SSMS 乱码用 utf-8-sig）', settings.encoding)
+        settings.copy_clipboard = ask('生成后复制到剪贴板？y/N',
+                                      'y' if settings.copy_clipboard else 'N').lower() == 'y'
 
-    shape = '1=CTE 包裹(可直接跑)  2=纯 UNION ALL 块  3=INSERT INTO ... VALUES'
-    fmt_choice = ask('输出形式  ' + shape, '1')
-    if fmt_choice == '3':
-        fmt, wrap = 'insert', 'plain'
-    else:
-        fmt, wrap = 'union', ('plain' if fmt_choice == '2' else 'cte')
-
-    if fmt == 'union' and len(rows) > UNION_ROW_WARN:
-        print('  ! {} 行用 UNION ALL 会生成很大的 SQL，建议改用 3=INSERT；也可继续。'.format(len(rows)))
-
-    table = ask('内联表名', 'HARDCODE') if fmt == 'insert' or wrap == 'cte' else 'HARDCODE'
-    empty_as_null = ask('空字符串按 NULL 处理？y/N', 'N').lower() == 'y'
-
-    options = SqlOptions(dialect=dialect, table=table or 'HARDCODE', fmt=fmt, wrap=wrap,
-                         empty_as_null=empty_as_null, batch_size=opts.batch_size)
-
-    out = Path(ask('\n输出文件路径', str(_default_out(target, sheet.name))).strip('"'))
-    encoding = ask('文件编码（SSMS 老版本中文乱码时用 utf-8-sig）', 'utf-8')
     try:
-        n = write_sql(out, header, rows, options, encoding=encoding)
-    except SqlGenError as e:
+        options = merge_options(args, settings)
+    except (ConfigError, SqlGenError) as e:
+        print('配置错误：{}'.format(e))
+        return EXIT_ERROR
+
+    # 行数保护：硬编码 SQL 不适合太大的表（与非交互模式保持一致）
+    if len(rows) > HARD_LIMIT_ROWS:
+        print('\n数据 {} 行，超过硬编码 SQL 的合理上限（{}）。'.format(len(rows), HARD_LIMIT_ROWS))
+        if ask('仍要继续？y/N', 'N').lower() != 'y':
+            print('>>> 已取消。建议改用数据库原生导入：BULK INSERT / LOAD DATA / COPY。')
+            return EXIT_OK
+    elif options.fmt == 'union' and len(rows) > UNION_ROW_WARN:
+        print('  提示：{} 行用 UNION ALL 生成的 SQL 很大，把配置改成 format = insert 通常更快。'
+              .format(len(rows)))
+
+    # 5) 输出路径（配置化：默认在源文件目录下建子目录，同名自动防冲突）
+    default_out = settings.default_output(target, sheet.name)
+    if args.out:
+        out = Path(args.out)            # 显式指定就按原样写（可覆盖）
+    elif settings.ask_advanced:
+        out = Path(ask('\n输出文件路径', str(default_out)).strip('"'))
+    elif settings.overwrite:
+        out = default_out
+    else:
+        out = unique_path(default_out)
+
+    try:
+        n = _write(out, header, rows, options, settings)
+    except (SqlGenError, ConfigError) as e:
         print('>>> 无法转换：{}'.format(e))
         return EXIT_ERROR
 
     print('\n[OK] {} 行 x {} 列 -> {}   ({:,} KB)'.format(
         n, len(header), out, max(1, out.stat().st_size // 1024)))
-    preview_head(header, rows, options)
-    if ask('\n复制到剪贴板？(y/N)', 'N').lower() == 'y':
+    _preview(header, rows, options)
+
+    if settings.copy_clipboard:
         text = build_sql(header, rows, options)
-        print('已复制 {} 字符'.format(len(text)) if copy_text(text)
+        print('已复制到剪贴板（{} 字符）'.format(len(text)) if copy_text(text)
               else '  ! 复制失败（系统未提供剪贴板命令）')
     return EXIT_OK
 
 
-def split_header(sheet: Sheet, row_index: int):
-    """按 1 基行号切出表头与数据，并裁掉右侧多余空列。"""
-    if row_index < 1 or row_index > sheet.nrows:
-        return None, []
-    header = list(sheet.rows[row_index - 1])
-    while len(header) > 1 and (header[-1] is None or str(header[-1]).strip() == ''):
-        header.pop()
-    rows = [list(r[:len(header)]) for r in sheet.rows[row_index:]]
-    return header, rows
+def _write(out: Path, header, rows, options: SqlOptions, settings: Settings) -> int:
+    encoding = settings.encoding
+    return write_sql(out, header, rows, options, encoding=encoding)
 
 
-def preview_head(header, rows, options: SqlOptions, lines: int = 2) -> None:
-    """打印前几条语句（不含注释与 CTE 尾巴）。"""
+def _preview(header, rows, options: SqlOptions, lines: int = 2) -> None:
     print('预览：')
     text = build_sql(header, rows[:max(lines, 1)], options)
     body = [l for l in text.split('\n')
@@ -195,11 +342,17 @@ def preview_head(header, rows, options: SqlOptions, lines: int = 2) -> None:
 
 
 # ------------------------------------------------------------------ 批处理
-def batch(args: argparse.Namespace) -> int:
+def batch(args: argparse.Namespace, settings: Settings) -> int:
     """非交互模式：任何情况都不调用 input()，出错直接返回非 0。"""
     target = Path(args.file)
     try:
-        infos = probe_sheets(target)                    # 先拿 sheet 清单，避免为报错而全量读取
+        wanted_header = resolve_header_row(args, settings)
+    except ConfigError as e:
+        print(e, file=sys.stderr)
+        return EXIT_ERROR
+
+    try:
+        infos = probe_sheets(target)
     except ReadError as e:
         print('读取失败：{}'.format(e), file=sys.stderr)
         return EXIT_ERROR
@@ -224,10 +377,15 @@ def batch(args: argparse.Namespace) -> int:
         print('读取失败：{}'.format(e), file=sys.stderr)
         return EXIT_ERROR
 
-    header, rows = split_header(sheet, args.header_row)
+    if wanted_header:
+        header_row = wanted_header
+    else:
+        header_row, reason = detect_header(sheet.rows)      # 自动识别：无需交互
+        print('表头自动识别：{}'.format(reason), file=sys.stderr)
+
+    header, rows = split_header(sheet, header_row)
     if header is None:
-        print('--header-row {} 超出范围（该表仅 {} 行）'.format(args.header_row, sheet.nrows),
-              file=sys.stderr)
+        print('表头行 {} 超出范围（该表仅 {} 行）'.format(header_row, sheet.nrows), file=sys.stderr)
         return EXIT_ERROR
 
     verdict = check_header(header, rows)
@@ -245,17 +403,25 @@ def batch(args: argparse.Namespace) -> int:
         print('数据 {} 行，超过硬编码 SQL 的合理上限（{}），建议改用数据库原生导入。'
               .format(len(rows), HARD_LIMIT_ROWS), file=sys.stderr)
         return EXIT_ERROR
-    if args.fmt == 'union' and len(rows) > UNION_ROW_WARN:
+    if (args.fmt or settings.format) == 'union' and len(rows) > UNION_ROW_WARN:
         print('提示：{} 行用 UNION ALL 生成的 SQL 很大，--format insert 通常更快。'
               .format(len(rows)), file=sys.stderr)
 
-    options = SqlOptions(dialect=resolve(args.dialect), table=args.table, fmt=args.fmt,
-                         wrap=args.wrap, empty_as_null=args.empty_as_null,
-                         all_string=args.all_string, batch_size=args.batch_size)
-    out = Path(args.out) if args.out else _default_out(target, sheet.name)
     try:
-        n = write_sql(out, header, rows, options, encoding=args.output_encoding)
-    except SqlGenError as e:
+        options = merge_options(args, settings)
+    except (ConfigError, SqlGenError) as e:
+        print('配置错误：{}'.format(e), file=sys.stderr)
+        return EXIT_ERROR
+
+    if args.out:
+        out = Path(args.out)                    # 显式指定就按原样写（可覆盖）
+    else:
+        out = settings.default_output(target, sheet.name)
+        if not settings.overwrite:
+            out = unique_path(out)
+    try:
+        n = _write(out, header, rows, options, settings)
+    except (SqlGenError, ConfigError) as e:
         print('无法转换：{}'.format(e), file=sys.stderr)
         return EXIT_ERROR
 
@@ -269,55 +435,94 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog='excel2sql',
         description='把 Excel / CSV 的每一行转成硬编码 SQL（UNION ALL 内联表或 INSERT VALUES）。',
-        epilog='不带 FILE 时进入交互向导；带 FILE 时完全非交互，适合批处理与 CI。',
+        epilog='不带 FILE 时进入交互向导；带 FILE 时完全非交互。\n'
+               '默认值来自 excel2sql.ini（数据目录或 ~/.excel2sql/config.ini），命令行参数优先级最高。',
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('file', nargs='?', help='源文件（.xlsx / .xlsm / .xls / .csv）')
     p.add_argument('-s', '--sheet', help='工作表名（多 sheet 时必须指定）')
-    p.add_argument('-o', '--out', help='输出 SQL 路径（默认 <文件名>_<sheet>_hardcode.sql）')
-    p.add_argument('-d', '--dialect', default='sqlserver', metavar='NAME',
-                   help='方言：sqlserver(默认) / mysql / oracle / postgresql，也可用 1~4')
-    p.add_argument('--header-row', type=int, default=1, metavar='N', help='表头所在行号，从 1 开始')
-    p.add_argument('--format', dest='fmt', choices=('union', 'insert'), default='union',
-                   help='输出格式：union=UNION ALL 内联表（默认），insert=INSERT INTO ... VALUES')
-    p.add_argument('--wrap', choices=('cte', 'plain'), default='cte',
-                   help='union 模式：cte=外面包 WITH ... AS（默认），plain=纯 UNION ALL 块')
-    p.add_argument('--table', default='HARDCODE', help='内联表名（默认 HARDCODE）')
-    p.add_argument('--empty-as-null', action='store_true', help='空字符串按 NULL 输出')
-    p.add_argument('--all-string', action='store_true', help='所有列强制按字符串输出')
-    p.add_argument('--batch-size', type=int, default=500, metavar='N',
-                   help='insert 模式每批行数（默认 500）')
-    p.add_argument('--encoding', dest='output_encoding', default='utf-8',
-                   help='输出文件编码（老版 SSMS 中文乱码时用 utf-8-sig）')
-    p.add_argument('--input-encoding', default=None, help='CSV 输入编码（默认自动尝试）')
-    p.add_argument('--delimiter', default=None, help='CSV 分隔符（默认自动探测）')
+    p.add_argument('-o', '--out', help='输出 SQL 路径（默认按配置 output_dir 生成）')
+    p.add_argument('-d', '--dialect', metavar='NAME',
+                   help='方言：sqlserver / mysql / oracle / postgresql，也可用 1~4')
+    p.add_argument('--header-row', metavar='N', default=None,
+                   help='表头行号；auto（默认）表示自动识别')
+    p.add_argument('--format', dest='fmt', choices=('union', 'insert'), help='输出格式')
+    p.add_argument('--wrap', choices=('cte', 'plain'), help='union 模式是否用 CTE 包裹')
+    p.add_argument('--table', help='内联表名')
+    neg = p.add_argument_group('布尔开关（不传则用配置）')
+    neg.add_argument('--empty-as-null', dest='empty_as_null', action='store_true', default=None,
+                     help='空字符串按 NULL 输出')
+    neg.add_argument('--no-empty-as-null', dest='empty_as_null', action='store_false',
+                     help='空字符串保留为空字符串')
+    neg.add_argument('--all-string', dest='all_string', action='store_true', default=None,
+                     help='所有列强制按字符串输出')
+    neg.add_argument('--no-all-string', dest='all_string', action='store_false',
+                     help='按列推断类型')
+    neg.add_argument('--copy-clipboard', dest='copy_clipboard', action='store_true', default=None,
+                     help='生成后复制到剪贴板')
+    neg.add_argument('--no-copy-clipboard', dest='copy_clipboard', action='store_false',
+                     help='不复制到剪贴板')
+    p.add_argument('--batch-size', type=int, metavar='N', help='insert 模式每批行数')
+    p.add_argument('--encoding', dest='output_encoding', help='输出文件编码（如 utf-8-sig）')
+    p.add_argument('--input-encoding', help='CSV 输入编码（默认自动尝试）')
+    p.add_argument('--delimiter', help='CSV 分隔符（默认自动探测）')
     p.add_argument('--force', action='store_true', help='表头不规范时自动修复并继续（非交互模式）')
+    p.add_argument('--config', help='指定配置文件路径')
+    p.add_argument('--init-config', action='store_true',
+                   help='在当前目录生成 excel2sql.ini 模板后退出')
     p.add_argument('-V', '--version', action='version', version='excel2sql {}'.format(__version__))
     return p
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.header_row < 1:
-        print('--header-row 必须 >= 1（现在给的是 {}）'.format(args.header_row), file=sys.stderr)
+
+    if args.init_config:
+        path = Path.cwd() / 'excel2sql.ini'
+        written = write_template(path, overwrite=True)
+        print('已生成配置模板：{}'.format(written))
+        return EXIT_OK
+
+    try:
+        settings, config_path, warnings = load_settings(args.config)
+    except ConfigError as e:
+        print('配置错误：{}'.format(e), file=sys.stderr)
         return EXIT_ERROR
-    if args.batch_size < 1:
+    for w in warnings:
+        print('[配置] {}'.format(w), file=sys.stderr)
+
+    # 命令行开关覆盖配置里的布尔项
+    if args.copy_clipboard is not None:
+        settings.copy_clipboard = args.copy_clipboard
+    if args.output_encoding:
+        settings.encoding = args.output_encoding
+    if args.batch_size:
+        settings.batch_size = args.batch_size
+
+    if args.batch_size is not None and args.batch_size < 1:
         print('--batch-size 必须 >= 1', file=sys.stderr)
         return EXIT_ERROR
+    if args.header_row is not None:
+        raw = str(args.header_row).strip().lower()
+        if raw not in ('auto', ''):
+            try:
+                if int(raw) < 1:
+                    raise ValueError
+            except ValueError:
+                print('--header-row 必须是 >= 1 的行号，或 auto', file=sys.stderr)
+                return EXIT_ERROR
+
     try:
         if args.file is None:
-            return interactive(args)
+            return interactive(args, settings, config_path)
         if not Path(args.file).is_file():
             print('文件不存在：{}'.format(args.file), file=sys.stderr)
             return EXIT_ERROR
-        return batch(args)
+        return batch(args, settings)
     except KeyboardInterrupt:
         print('\n已中断')
         return 130
     except EOFError:
         print('\n输入结束。非交互环境请改用：excel2sql <文件> [-s sheet] [-o out.sql]', file=sys.stderr)
-        return EXIT_ERROR
-    except RecursionError:
-        print('文件层级异常，无法解析', file=sys.stderr)
         return EXIT_ERROR
 
 
