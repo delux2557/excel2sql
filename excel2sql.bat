@@ -18,7 +18,7 @@ set "HERE=%~dp0"
 set "PY="
 
 rem --- 0) hard-code python.exe here if you prefer (uncomment + edit) ---
-rem set "PY=C:\Python312\python.exe"
+rem set "PY=C:\Path\To\python.exe"
 
 rem --- 1) python-path.txt next to this file (single line: python.exe path) ---
 if exist "%HERE%python-path.txt" for /f "usebackq delims=" %%i in ("%HERE%python-path.txt") do if not defined PY set "PY=%%i"
@@ -36,9 +36,9 @@ if not defined PY if exist "%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
 if not defined PY if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" set "PY=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
 if not defined PY if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PY=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
 if not defined PY if exist "%LOCALAPPDATA%\Programs\Python\Python310\python.exe" set "PY=%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
+if not defined PY if exist "C:\Python313\python.exe" set "PY=C:\Python313\python.exe"
 if not defined PY if exist "C:\Python312\python.exe" set "PY=C:\Python312\python.exe"
 if not defined PY if exist "C:\Python311\python.exe" set "PY=C:\Python311\python.exe"
-if not defined PY if exist "C:\Python312\python.exe" set "PY=C:\Python312\python.exe"
 
 rem --- 5) python on PATH (skip the Microsoft Store stub) ---
 if not defined PY for /f "delims=" %%i in ('where python 2^>nul ^| findstr /i /v WindowsApps') do if not defined PY set "PY=%%i"

@@ -51,7 +51,7 @@ python -c "import sys,runpy; sys.path.insert(0, r'<仓库路径>\src'); runpy.ru
 3. 仓库内的 `.venv\Scripts\python.exe`
 4. `PATH` 里的 `python`（自动跳过 Microsoft Store 的占位程序）
 5. `py -3` 启动器
-6. 常见安装位置：`%LOCALAPPDATA%\Programs\Python\Python310`~`313`、`C:\Python311`/`C:\Python312`、`C:\Python312\python-3.12.10-embed-amd64`
+6. 常见安装位置：`%LOCALAPPDATA%\Programs\Python\Python310`~`313`、`C:\Python311`~`C:\Python313`
 
 如果都找不到（或版本低于 3.9），窗口里会给出具体解决办法。**最省事的办法**是在仓库根建一个 `python-path.txt`：
 
@@ -182,7 +182,8 @@ copy_clipboard = false
 - 配置写错不会中断：无法解析的项会打印一条 `[配置] ...` 警告，并回退到默认值
 - 键名多余或未知会被忽略，方便把同一份 ini 在不同版本间复用
 - `ask_advanced = true` 时才逐项询问，适合想每次手动确认的场景
-- 完整示例见 [`excel2sql.ini.example`](excel2sql.ini.example)
+- 完整示例见 [`excel2sql.ini.example`](excel2sql.ini.example)（**注意它是模板**：程序只认 `excel2sql.ini`，
+  需要复制或改名才生效；`excel2sql.ini` 属本机配置，已在 `.gitignore` 里排除）
 
 ## 输出格式
 

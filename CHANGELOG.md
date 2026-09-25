@@ -57,7 +57,7 @@
 - **跨平台剪贴板**：Windows `Set-Clipboard` / macOS `pbcopy` / Linux `wl-copy`·`xclip`·`xsel`
 - **MIT License**（`LICENSE`），`pyproject.toml` 同步声明 license 与 classifier
 - **`excel2sql.bat` 自动探测 python**：依次尝试 `python-path.txt` → `EXCEL2SQL_PYTHON` → 仓库 `.venv`
-  → `PATH`（跳过 Microsoft Store 占位程序）→ `py -3` → 常见安装目录（含 `C:\Python3*`、`C:\Python3*`），
+  → `PATH`（跳过 Microsoft Store 占位程序）→ `py -3` → 常见安装目录（`%LOCALAPPDATA%\Programs\Python\Python3*`、`C:\Python3*`），
   并检查版本 ≥ 3.9；全部失败时打印三种配置办法
 
 ### 安全

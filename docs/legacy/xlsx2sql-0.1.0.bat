@@ -6,7 +6,7 @@ rem 若提示找不到 python，把下面这一行改成你的 python.exe 完整
 set "PY=python"
 
 where %PY% >nul 2>nul
-if errorlevel 1 set "PY=C:\Python312\python.exe"
+if errorlevel 1 set "PY=C:\Path\To\python.exe"
 
 "%PY%" "%~dp0xlsx2sql.py" %*
 echo.
