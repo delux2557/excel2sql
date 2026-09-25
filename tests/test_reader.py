@@ -41,9 +41,9 @@ class TestCsv(unittest.TestCase):
 
     def test_gbk_encoding(self):
         with tempfile.TemporaryDirectory() as d:
-            p = write_csv(Path(d) / 'gbk.csv', '装运方式,数量\nA-1,20\n', encoding='gbk')
+            p = write_csv(Path(d) / 'gbk.csv', '装运方式,细分市场\n一级,消费者\n', encoding='gbk')
             sheet = read_sheets(p)[0]
-            self.assertEqual(sheet.rows[0], ['装运方式', '数量'])
+            self.assertEqual(sheet.rows[0], ['装运方式', '细分市场'])
 
     def test_utf8_bom(self):
         with tempfile.TemporaryDirectory() as d:
@@ -85,9 +85,9 @@ class TestCsv(unittest.TestCase):
 @unittest.skipIf(openpyxl is None, '需要 openpyxl')
 class TestExcel(unittest.TestCase):
     ROWS = [
-        ['序号', '装运方式', '数量', '时间'],
-        [1, 'A-1', 25, datetime.datetime(2026, 9, 8, 8, 25, 46)],
-        [2, '二级', None, datetime.datetime(2026, 9, 9, 9, 0, 0)],
+        ['行 ID', '装运方式', '细分市场', '订购日期'],
+        [40098, '一级', 2, datetime.datetime(2024, 11, 11, 0, 0, 0)],
+        [26341, '二级', None, datetime.datetime(2024, 11, 13, 0, 0, 0)],
     ]
 
     def _book(self, d):
@@ -97,8 +97,8 @@ class TestExcel(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             sheets = read_sheets(self._book(d))
             self.assertEqual([s.name for s in sheets], ['数据', '字典'])
-            self.assertEqual(sheets[0].rows[0], ['序号', '装运方式', '数量', '时间'])
-            self.assertEqual(sheets[0].rows[1][3], datetime.datetime(2026, 9, 8, 8, 25, 46))
+            self.assertEqual(sheets[0].rows[0], ['行 ID', '装运方式', '细分市场', '订购日期'])
+            self.assertEqual(sheets[0].rows[1][3], datetime.datetime(2024, 11, 11, 0, 0, 0))
 
     def test_empty_cell_is_none(self):
         with tempfile.TemporaryDirectory() as d:

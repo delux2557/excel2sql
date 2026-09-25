@@ -84,12 +84,14 @@ excel2sql
 
 读取：D:\data\superstore-sample.csv
   唯一 sheet：superstore-sample  (31 行 x 24 列)，自动使用
+  读取数据中…（几万行的 Excel 可能要十几秒）
   表头识别：第 1 行最像表头（文本列名 + 下方是数据）
 
 表头预览（← 标记的是当前选中的表头行）：
-     1 | 行 ID | 订单 ID | 订购日期 | …                 ← 表头
-     2 | 40098 | CA-2014-AB1001… | 2024-11-11 00:… |
-     3 | 26341 | IN-2014-JR1621… | 2024-02-05 00:… |
+     1 | 行 ID | 订单 ID | 订购日期 | 装运日期 | 装运方式 | 客户 ID | 客户名称 | …(+17 列)   ← 表头
+     2 | 40098 | CA-2014-AB1001… | 2024-11-11 00:… | 2024-11-13 00:… | 一级 | AB-100151402 | Aaron Bergman | …(+17 列)
+     3 | 26341 | IN-2014-JR1621… | 2024-02-05 00:… | 2024-02-07 00:… | 二级 | JR-162107 | Justin Ritter | …(+17 列)
+     … | …（共 31 行）
 回车确认，或输入其它行号修正 [1]:
   表头校验通过：24 列 / 30 行数据
 
@@ -102,10 +104,13 @@ excel2sql
 方言、输出格式、表名、编码、输出目录这些**由配置文件决定**（见[配置文件](#配置文件)），
 需要临时改就用命令行参数（例如 `excel2sql -d mysql`）。
 
+仓库自带一份可以直接拿来跑的示例数据（就是上面这份，来自公开的零售订单样例集）：
+[`examples/superstore-sample.csv`](examples/superstore-sample.csv)，30 行 × 24 列。
+
 ### 非交互（脚本 / CI）
 
 ```bash
-# SQL Server，CTE 内联表
+# SQL Server，CTE 内联表（examples/ 里就有这份数据）
 excel2sql examples/superstore-sample.csv -o out.sql
 
 # MySQL，改成 INSERT 分批，空串按 NULL
@@ -113,6 +118,9 @@ excel2sql examples/superstore-sample.csv -d mysql --format insert --empty-as-nul
 
 # Oracle，只要纯 UNION ALL 块（方便嵌进已有 SQL）
 excel2sql examples/superstore-sample.csv -d oracle --wrap plain -o out.sql
+
+# 多 sheet 的 Excel 要指定工作表
+excel2sql 订单表.xlsx -s 明细 -o out.sql
 
 # CSV，表头在第 2 行，分号分隔
 excel2sql data.csv --header-row 2 --delimiter ";" -o out.sql
@@ -220,9 +228,9 @@ SELECT '上海市' || CHR(10) || '浦东新区' AS "收货地址"     -- Oracle 
 |---|---|
 | 空单元格（Excel 的 `None`、pandas 的 `NaN`） | `NULL` |
 | 空字符串 | `''`，加 `--empty-as-null` 后变 `NULL` |
-| 数字 | 原样，如 `25`、`62.9`；`NaN`/`inf` → `NULL` |
-| 日期 | `'2026-09-08'`（Oracle 为 `TO_DATE(...,'YYYY-MM-DD')`） |
-| 日期时间 | `'2026-09-08 08:25:46'`（Oracle 为 `TO_DATE(...,'YYYY-MM-DD HH24:MI:SS')`） |
+| 数字 | 原样，如 `2`、`221.98`；`NaN`/`inf` → `NULL` |
+| 日期 | `'2024-11-11'`（Oracle 为 `TO_DATE(...,'YYYY-MM-DD')`） |
+| 日期时间 | `'2024-11-11 00:00:00'`（Oracle 为 `TO_DATE(...,'YYYY-MM-DD HH24:MI:SS')`） |
 | 布尔 | `'1'` / `'0'` |
 | **同列混有数字和字符串** | 整列按字符串输出（避免 `UNION ALL` 类型冲突） |
 | 加了 `--all-string` | 所有非空值都按字符串输出 |

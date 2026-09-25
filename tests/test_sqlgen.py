@@ -105,16 +105,16 @@ class TestMultiline(unittest.TestCase):
     """单元格内换行要拼成单行表达式，避免一条 SELECT 被换行截断。"""
 
     def test_sqlserver_concat(self):
-        sql = build_sql(['t'], [['一级\n浦东新区']], opts())
-        self.assertIn("SELECT N'一级' + CHAR(10) + N'浦东新区' AS [t]", sql)
+        sql = build_sql(['t'], [['上海市\n浦东新区']], opts())
+        self.assertIn("SELECT N'上海市' + CHAR(10) + N'浦东新区' AS [t]", sql)
 
     def test_mysql_concat(self):
-        sql = build_sql(['t'], [['一级\n浦东新区']], opts(dialect=dialects.MYSQL))
-        self.assertIn("SELECT CONCAT('一级', CHAR(10), '浦东新区') AS `t`", sql)
+        sql = build_sql(['t'], [['上海市\n浦东新区']], opts(dialect=dialects.MYSQL))
+        self.assertIn("SELECT CONCAT('上海市', CHAR(10), '浦东新区') AS `t`", sql)
 
     def test_oracle_chr(self):
-        sql = build_sql(['t'], [['一级\n浦东新区']], opts(dialect=dialects.ORACLE))
-        self.assertIn("'一级' || CHR(10) || '浦东新区'", sql)
+        sql = build_sql(['t'], [['上海市\n浦东新区']], opts(dialect=dialects.ORACLE))
+        self.assertIn("'上海市' || CHR(10) || '浦东新区'", sql)
 
     def test_crlf_normalized(self):
         sql = build_sql(['t'], [['a\r\nb']], opts())

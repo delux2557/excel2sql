@@ -47,7 +47,7 @@ def run(argv):
     return code, out.getvalue(), err.getvalue()
 
 
-def make_csv(root: Path, name='data.csv', text='装运方式,数量\nA-1,20\nA-2,30\n') -> Path:
+def make_csv(root: Path, name='data.csv', text='装运方式,细分市场\n一级,消费者\n二级,公司\n') -> Path:
     p = root / name
     p.write_text(text, encoding='utf-8')
     return p
@@ -105,7 +105,7 @@ class TestNonInteractiveContract(unittest.TestCase):
             code, stdout, err = run([str(src), '-o', str(out)])
             self.assertEqual(code, EXIT_OK, err)
             sql = out.read_text(encoding='utf-8')
-            self.assertIn("SELECT N'A-1' AS [装运方式], N'20' AS [数量]", sql)
+            self.assertIn("SELECT N'一级' AS [装运方式], N'消费者' AS [细分市场]", sql)
             self.assertIn('WITH [HARDCODE] AS', sql)
             self.assertIn('SELECT * FROM [HARDCODE];', sql)
             self.assertIn('[OK]', stdout)
@@ -368,7 +368,7 @@ class TestConsoleEncoding(unittest.TestCase):
         buf = io.BytesIO()
         stream = io.TextIOWrapper(buf, encoding='cp1252', errors='strict', newline='')
         with _Sandbox(self) as root:
-            src = make_csv(root, name='d.csv', text='装运方式,数量\nA-1,20\n')
+            src = make_csv(root, name='d.csv', text='装运方式,细分市场\n一级,消费者\n')
             old = sys.stdout, sys.stderr
             sys.stdout = sys.stderr = stream
             try:

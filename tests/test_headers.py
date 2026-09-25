@@ -80,7 +80,7 @@ class TestDetect(unittest.TestCase):
     """表头行自动识别（交互/批处理都用它给出行号建议）。"""
 
     def test_header_on_first_row(self):
-        rows = [['序号', '装运方式', '数量'], [1, 'A-1', 25], [2, '二级', 30]]
+        rows = [['行 ID', '装运方式', '细分市场'], [1, '一级', 2], [2, '二级', 9]]
         row, reason = headers.detect(rows)
         self.assertEqual(row, 1)
         self.assertIn('第 1 行', reason)
@@ -120,7 +120,7 @@ class TestLooksLikeValue(unittest.TestCase):
 
     def test_text_and_bool(self):
         self.assertFalse(headers.looks_like_value('订单号'))
-        self.assertFalse(headers.looks_like_value('一级'))
+        self.assertFalse(headers.looks_like_value('AB-100151402'))
         self.assertFalse(headers.looks_like_value(True))
         self.assertFalse(headers.looks_like_value('2026年'))
 

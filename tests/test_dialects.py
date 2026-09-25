@@ -20,7 +20,7 @@ class TestIdentifierQuoting(unittest.TestCase):
         self.assertEqual(dialects.POSTGRESQL.quote_ident('a"b'), '"a""b"')
 
     def test_chinese_column_names(self):
-        self.assertEqual(dialects.SQLSERVER.quote_ident('装运方式号'), '[装运方式号]')
+        self.assertEqual(dialects.SQLSERVER.quote_ident('客户 ID'), '[客户 ID]')
 
 
 class TestStringQuoting(unittest.TestCase):
