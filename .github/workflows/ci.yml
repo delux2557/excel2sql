@@ -34,11 +34,14 @@ jobs:
         run: python -m pytest -q
 
       - name: CLI smoke test (non-interactive)
+        # 五个方言都要过一遍：方言规则是各写一份的，漏一个就是漏一种产物
         run: |
           excel2sql --version
           excel2sql examples/superstore-sample.csv -o build/sample.sql -d sqlserver
           excel2sql examples/superstore-sample.csv -o build/sample-insert.sql --format insert -d mysql
           excel2sql examples/superstore-sample.csv -o build/sample-ora.sql -d oracle
+          excel2sql examples/superstore-sample.csv -o build/sample-pg.sql -d postgresql
+          excel2sql examples/superstore-sample.csv -o build/sample-lite.sql -d sqlite
 
       - name: Show generated head
         # Windows 上 stdout 走管道时用的是 ANSI 码页（en-US runner 即 cp1252），
