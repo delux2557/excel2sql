@@ -14,7 +14,7 @@
 - **配置文件**（ssh config 风格）：方言、输出格式、输出目录、编码、空串策略、剪贴板等写进 `excel2sql.ini`，
   交互时不再逐项询问；命令行参数可临时覆盖
 - **完全非交互模式**：给定文件参数后不再有任何 `input()`，可安全用于批处理与 CI
-- **多方言**：SQL Server / MySQL / Oracle / PostgreSQL，标识符引用、字符串转义、日期包装、换行拼接各不相同
+- **多方言**：SQL Server / MySQL / Oracle / PostgreSQL / SQLite，标识符引用、字符串转义、日期包装、换行拼接各不相同
 - **表头体检**：识别空列名、重复列名、"表头其实是数据行"，可自动修复（`col_N` / `_2` 后缀）
 - **列级类型统一**：同列混了数字和字符串时整列字符串化，避免 `UNION ALL` 触发隐式转换报错或算术溢出
 - **转义安全**：列名按方言转义内部引号，字符串转义单引号（MySQL 额外处理反斜杠），避免列名/单元格内容破坏 SQL 结构
@@ -73,7 +73,7 @@ excel2sql
 
 ```
 ==========================================================
-  excel2sql 0.3.2  |  Excel / CSV  ->  硬编码 SQL
+  excel2sql 0.4.0  |  Excel / CSV  ->  硬编码 SQL
 ==========================================================
 配置：使用内置默认值（sqlserver / union / cte / 表名 HARDCODE）
 提示：在数据目录放一个 excel2sql.ini 就能固化方言/格式/输出目录等设置。
@@ -135,14 +135,14 @@ excel2sql data.csv --header-row 2 --delimiter ";" -o out.sql
 | `FILE` | 源文件；**省略则进入交互向导** |
 | `-s, --sheet NAME` | 工作表名（多 sheet 时必填，否则报错并列出可选值） |
 | `-o, --out PATH` | 输出路径；**显式指定则按原样写入**（可覆盖），不指定则按配置的 `output_dir` 生成并防冲突 |
-| `-d, --dialect NAME` | `sqlserver` / `mysql` / `oracle` / `postgresql`，也可用 `1`~`4` |
+| `-d, --dialect NAME` | `sqlserver` / `mysql` / `oracle` / `postgresql` / `sqlite`，也可用 `1`~`5` |
 | `--header-row N` | 表头行号；`auto`（默认）表示自动识别 |
 | `--format union\|insert` | 输出格式 |
 | `--wrap cte\|plain` | `union` 模式下是否用 `WITH ... AS (...)` 包裹 |
 | `--table NAME` | 内联表名 |
 | `--empty-as-null` / `--no-empty-as-null` | 空字符串是否按 `NULL` 输出 |
 | `--all-string` / `--no-all-string` | 是否所有列强制按字符串输出 |
-| `--infer-types` / `--no-infer-types` | CSV 等无类型信息的输入：整列都是数字时按数字输出（默认关，见[类型与空值规则](#类型与空值规则)） |
+| `--infer-types` / `--no-infer-types` | 强制 / 关闭数字类型推断（默认 `auto`：**只对 CSV 生效**，见[类型与空值规则](#类型与空值规则)） |
 | `--copy-clipboard` / `--no-copy-clipboard` | 生成后是否复制到剪贴板 |
 | `--batch-size N` | `insert` 模式每批行数 |
 | `--encoding ENC` | 输出文件编码，如 `utf-8-sig`（老版 SSMS 中文乱码时用） |
@@ -168,7 +168,7 @@ excel2sql --init-config          # 生成带注释的模板 excel2sql.ini
 
 ```ini
 [output]
-dialect = mysql                 # sqlserver | mysql | oracle | postgresql
+dialect = mysql                 # sqlserver | mysql | oracle | postgresql | sqlite
 format = union                  # union | insert
 wrap = cte                      # cte | plain
 table = HARDCODE
@@ -201,12 +201,15 @@ copy_clipboard = false
 
 ```sql
 WITH [HARDCODE] AS (
-SELECT N'一级' AS [装运方式], N'消费者' AS [细分市场]
-UNION ALL
-SELECT N'二级' AS [装运方式], N'公司' AS [细分市场]
+    SELECT N'一级' AS [装运方式], N'消费者' AS [细分市场]
+    UNION ALL
+    SELECT N'二级' AS [装运方式], N'公司' AS [细分市场]
 )
 SELECT * FROM [HARDCODE];
 ```
+
+CTE 体内的 `SELECT` / `UNION ALL` 缩进一级、闭合括号回到行首；`--wrap plain` 则**不缩进**，
+因为那是给「嵌进已有 SQL」用的，缩进交给调用方按所在层级对齐。
 
 `insert`：
 
@@ -222,6 +225,7 @@ INSERT INTO [HARDCODE] ([装运方式], [细分市场]) VALUES
 SELECT N'上海市' + CHAR(10) + N'浦东新区' AS [收货地址]   -- SQL Server
 SELECT CONCAT('上海市', CHAR(10), '浦东新区') AS `收货地址` -- MySQL
 SELECT '上海市' || CHR(10) || '浦东新区' AS "收货地址"     -- Oracle / PostgreSQL
+SELECT '上海市' || CHAR(10) || '浦东新区' AS "收货地址"    -- SQLite
 ```
 
 ## 类型与空值规则
@@ -231,42 +235,68 @@ SELECT '上海市' || CHR(10) || '浦东新区' AS "收货地址"     -- Oracle 
 | 空单元格（Excel 的 `None`、pandas 的 `NaN`） | `NULL` |
 | 空字符串 | `''`，加 `--empty-as-null` 后变 `NULL` |
 | 数字 | 原样，如 `2`、`221.98`；`NaN`/`inf` → `NULL` |
-| 日期 | `'2024-11-11'`（Oracle 为 `TO_DATE(...,'YYYY-MM-DD')`） |
+| 日期 | `'2024-11-11'`（Oracle 为 `TO_DATE(...,'YYYY-MM-DD')`；SQLite 同为纯文本，它没有日期类型） |
 | 日期时间 | `'2024-11-11 00:00:00'`（Oracle 为 `TO_DATE(...,'YYYY-MM-DD HH24:MI:SS')`） |
 | 布尔 | `'1'` / `'0'` |
 | **同列混有数字和字符串** | 整列按字符串输出（避免 `UNION ALL` 类型冲突） |
-| 加了 `--all-string` | 所有非空值都按字符串输出 |
-| **CSV 输入** | CSV 没有类型信息，读出来全是文本 → **所有列都按字符串输出**；需要数字语义请加 `--infer-types` |
-| 加了 `--infer-types` | **整列都是数字文本**的列按数字输出；带前导零（`'007'`）、`NaN`/`inf`、混有非数字的列一律保持文本 |
+| 加了 `--all-string` | 所有非空值都按字符串输出（此时不做数字推断） |
+| **CSV 输入（默认 `auto`）** | CSV 没有类型信息，读出来全是文本。默认把**整列都能无损解析成数字**的列还原成数字，其余列保持文本 |
+| `infer_types = off` / `--no-infer-types` | CSV 的列一律按字符串输出（0.3.x 的旧行为，仍可完整复现） |
+| `infer_types = on` / `--infer-types` | 强制推断，**Excel 源也照做**（默认 `auto` 会放过 Excel 源） |
+| 推断时**刻意不转**的列 | 带前导零的整数（`'007'` 是编号不是数量）、有效数字超过 **15 位**的、含 `NaN`/`inf` 的、混有非数字的 |
+
+> **为什么 `auto` 只对 CSV 生效**：xlsx/xls 的单元格自带类型 —— 写成文本就是用户有意的文本，
+> 工具不该去改写它已经明确表达过的意图。CSV 没有这个信息，才需要靠内容推断。
+>
+> **为什么卡在 15 位有效数字**：Excel 本身只保证 15 位有效数字。越过这条线的"数字"几乎一定是
+> 编号/账号而不是数量，而且 19 位以上会超出 SQL Server / MySQL / PostgreSQL 的 `bigint` 范围 ——
+> 硬转成数字字面量会让**灌库直接报错**。宁可留在文本。
+>
+> ★ **已知边界**：11 位手机号这类能无损装进 `bigint` 的编号**仍会被转成数字**。
+> 要保住它们用 `--no-infer-types`，或让编号带前导零（那样会自动保留文本）。
 
 > 为什么必须做列级统一：SQL Server 会按数据类型优先级把 `nvarchar` 隐式转成 `int`，于是 `'t'` 报 `Conversion failed`、`7900454710` 直接算术溢出。
 >
-> 反过来说，**被字符串化的列在三库里都算不了数**：实测 `SUM()` 在 SQL Server 报 `Msg 8117 Operand data type nvarchar is invalid for sum operator`、PostgreSQL 报 `function sum(text) does not exist`（MySQL 会隐式转换且结果正确）。所以 CSV 输入若要做数值统计，请开 `--infer-types`，或先用 xlsx。
+> 反过来说，**被字符串化的列在三库里都算不了数**：实测 `SUM()` 在 SQL Server 报 `Msg 8117 Operand data type nvarchar is invalid for sum operator`、PostgreSQL 报 `function sum(text) does not exist`（MySQL 会隐式转换且结果正确）。CSV 输入在 0.4.0 起默认自动还原数字列，正是为了让这条不成为默认陷阱。
 
 ## 各方言差异
 
-| | SQL Server | MySQL | Oracle | PostgreSQL |
-|---|---|---|---|---|
-| 标识符 | `[col]`，`]`→`]]` | `` `col` ``，`` ` ``→` `` ` `` | `"col"`，`"`→`""` | `"col"`，`"`→`""` |
-| 字符串前缀 | `N'...'` | `'...'` | `'...'` | `'...'` |
-| 单引号转义 | `''` | `''` | `''` | `''` |
-| 反斜杠 | 无特殊含义 | **额外转义为 `\\`** | 无特殊含义 | 无特殊含义 |
-| 拼接 | `+` | `CONCAT(...)` | `\|\|` | `\|\|` |
-| 换行 | `CHAR(10)` | `CHAR(10 USING utf8mb4)` | `CHR(10)` | `CHR(10)` |
-| 日期 | 隐式转换 | 隐式转换 | `TO_DATE(...)` | 隐式转换 |
-| 无表查询 | 不需要 `FROM` | 不需要 | `FROM dual` | 不需要 |
+| | SQL Server | MySQL | Oracle | PostgreSQL | SQLite |
+|---|---|---|---|---|---|
+| 标识符 | `[col]`，`]`→`]]` | `` `col` ``，`` ` ``→` `` ` `` | `"col"`，`"`→`""` | `"col"`，`"`→`""` | `"col"`，`"`→`""` |
+| 字符串前缀 | `N'...'` | `'...'` | `'...'` | `'...'` | `'...'` |
+| 单引号转义 | `''` | `''` | `''` | `''` | `''` |
+| 反斜杠 | 无特殊含义 | **额外转义为 `\\`** | 无特殊含义 | 无特殊含义 | 无特殊含义 |
+| 拼接 | `+` | `CONCAT(...)` | `\|\|` | `\|\|` | `\|\|` |
+| 换行 | `CHAR(10)` | `CHAR(10 USING utf8mb4)` | `CHR(10)` | `CHR(10)` | `CHAR(10)` |
+| 日期 | 隐式转换 | 隐式转换 | `TO_DATE(...)` | 隐式转换 | 纯 ISO 文本 |
+| 无表查询 | 不需要 `FROM` | 不需要 | `FROM dual` | 不需要 | 不需要 |
 
-## 落地到数据库时的两点注意
+日期包装只在**方言自己需要**时才加：目前只有 Oracle（裸字符串参与日期比较会失败，必须 `TO_DATE`）。
+SQL Server / MySQL / PostgreSQL 由上下文自动转换；SQLite 没有日期类型，ISO-8601 文本就是它的规范表示，
+`date()` / `strftime()` 能直接识别（`tests/test_sqlite.py` 里有实测守着这条前提）。
+
+## 落地到数据库时的注意
 
 产物是**纯 `SELECT` / `INSERT` 文本**，本身不带类型声明：
 
-- **`union` 产物是裸 `SELECT`**。用 `SELECT * INTO`（SQL Server）/ `CREATE TABLE AS`（PG、MySQL）
+- **`union` 产物是裸 `SELECT`**。用 `SELECT * INTO`（SQL Server）/ `CREATE TABLE AS`（PG、MySQL、SQLite）
   让数据库**从字面量推类型**时，日期列只会落成字符串类型（SS `nvarchar`、PG `text`、MySQL `varchar`），
-  数字列也取决于字面量（CSV 不开 `--infer-types` 会落成文本）。**正式建表请自己写 `CREATE TABLE`**，
-  再用 `insert` 产物灌数据 —— 实测这样三库都能无损接受。
+  数字列也取决于字面量。**正式建表请自己写 `CREATE TABLE`**，再用 `insert` 产物灌数据 ——
+  实测这样都能无损接受。
 - **MySQL 执行端要显式指定字符集**。`docker exec` 或任何非交互会话里，MySQL 客户端默认用 `latin1`，
   中文和 emoji 会**按字节**落进 `latin1` 列（`CHAR_LENGTH('📦🚚✅')` 返回 11 而不是 3）。
   执行产物前先 `SET NAMES utf8mb4;`，或给客户端加 `--default-character-set=utf8mb4`。
+- **SQLite：列的「亲和性」会改写你存进去的值**。SQLite 是动态类型，但若目标列声明了数值亲和性，
+  `'0001'` 会被**静默存成整数 `1`**（实测：`CREATE TABLE t (a NUMERIC)` 之后 `INSERT ... ('0001')`
+  读回是 `1`；声明 `TEXT` 则原样保留）。所以**编号类列务必声明 `TEXT`**：
+
+  ```sql
+  CREATE TABLE orders ("订单编号" TEXT, "数量" INTEGER, "金额" REAL, "订购日期" TEXT);
+  ```
+
+  日期没有原生类型，ISO-8601 文本就是规范表示，`date()` / `strftime()` 直接可用：
+  `SELECT strftime('%Y', "订购日期") FROM orders;`
 
 ## 表头体检
 
@@ -299,7 +329,7 @@ SELECT '上海市' || CHR(10) || '浦东新区' AS "收货地址"     -- Oracle 
 |---|---|
 | < 2000 | `UNION ALL` 完全够用，方言兼容性最好 |
 | 2000 ~ 20000 | 用 `--format insert --batch-size 500`，解析开销小很多 |
-| > 20000 | 别用本工具导入。改用数据库原生通道：SQL Server `BULK INSERT`/`bcp`、MySQL `LOAD DATA INFILE`、Oracle `SQL*Loader`/外部表、PostgreSQL `COPY` |
+| > 20000 | 别用本工具导入。改用数据库原生通道：SQL Server `BULK INSERT`/`bcp`、MySQL `LOAD DATA INFILE`、Oracle `SQL*Loader`/外部表、PostgreSQL `COPY`、SQLite `.import` |
 | > 200000 | 工具会直接拒绝，避免生成一个谁也打不开的 SQL 文件 |
 
 ## 目录结构
@@ -314,7 +344,9 @@ SELECT '上海市' || CHR(10) || '浦东新区' AS "收货地址"     -- Oracle 
 │   ├── sqlgen.py           # 字面量渲染与 SQL 生成
 │   ├── dialects.py         # 各方言规则
 │   └── clipboard.py        # 跨平台剪贴板
-├── tests/                  # pytest / unittest 均可跑（含 test_regressions.py 回归集）
+├── tests/                  # pytest / unittest 均可跑
+│   ├── test_regressions.py # 实测发现的缺陷回归集
+│   └── test_sqlite.py      # SQLite：把产物真灌进 sqlite3 再逐格核对（标准库，能进 CI）
 ├── examples/               # 示例数据（可直接喂给 CLI）
 ├── docs/
 │   ├── reviews/            # 代码评审记录
@@ -331,10 +363,14 @@ SELECT '上海市' || CHR(10) || '浦东新区' AS "收货地址"     -- Oracle 
 
 ```bash
 python -m pip install -e ".[dev]"
-python -m pytest                  # 或 python -m unittest discover -s tests
+python -m pytest                                    # 或：
+python -m unittest discover -s tests -t .            # 必须带 -s / -t：
+                                                    # tests/__init__.py 靠它把 src/ 注入模块路径
 ```
 
 测试不依赖网络，xlsx 用例会在运行时用 openpyxl 现场生成临时文件。
+SQLite 用例用的是标准库 `sqlite3`，所以「生成 → 灌库 → 读回」这条端到端链路也会在 CI 里真跑，
+不像 SQL Server / Oracle 那样需要外部容器。
 
 ## 已知限制
 
@@ -342,6 +378,9 @@ python -m pytest                  # 或 python -m unittest discover -s tests
 - `.xls`、`.xlsm` 依赖可选包（`pandas`+`xlrd` / `openpyxl`）
 - 一个 sheet 只处理一张连续表，不支持多块表头或合并单元格的"花式"版式
 - 超宽表（几百列）生成的 SQL 单行会很长，部分客户端显示吃力
+- 数字类型推断的边界：**能无损装进 64 位整数的编号仍会被转成数字**（如 11 位手机号）。
+  要保住这类列用 `--no-infer-types`，或让编号带前导零
+- `-d` 传入无法识别的方言名会**静默回退成 SQL Server**（拼错就是错的方言，且不会报错）
 
 ## 变更记录
 

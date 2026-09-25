@@ -7,7 +7,7 @@
 # 布尔值写 true / false。
 
 [output]
-# 目标数据库方言: sqlserver | mysql | oracle | postgresql
+# 目标数据库方言: sqlserver | mysql | oracle | postgresql | sqlite
 dialect = sqlserver
 # 输出格式: union = UNION ALL 内联表, insert = INSERT INTO ... VALUES
 format = union
@@ -36,9 +36,14 @@ filename = {name}_{sheet}_hardcode.sql
 empty_as_null = false
 # 所有列强制按字符串输出
 all_string = false
-# CSV 没有类型信息，读出来一律是文本；打开后整列都能解析成数字的列会还原成数字
-# （带前导零的编号如 007 不转，避免丢信息）。Excel 源不受影响。
-infer_types = false
+# CSV 等无类型信息的输入：整列都能无损解析成数字时按数字输出
+#   auto = 只在推断安全时生效（默认）—— 仅对 CSV 生效；Excel 源不受影响，
+#          因为 xlsx/xls 的单元格自带类型，写成文本就是用户有意的文本
+#   on   = 强制推断（Excel 源也照做）
+#   off  = 关闭，CSV 的列一律按字符串输出
+# 不会转换：带前导零的整数（007，是编号不是数量）、有效数字超过 15 位的
+# （越过 Excel 的精度上限，多半是编号，且再长会有 bigint 溢出风险）、NaN/inf。
+infer_types = auto
 # 表头行号: auto = 自动识别（交互里会打印预览让你确认）, 或写 1 / 2 / ...
 header_row = auto
 
