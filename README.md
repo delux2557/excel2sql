@@ -1,6 +1,7 @@
 # excel2sql
 
 [![CI](https://github.com/delux2557/excel2sql/actions/workflows/ci.yml/badge.svg)](https://github.com/delux2557/excel2sql/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 把 Excel / CSV 的每一行转成**可直接执行的硬编码 SQL**：既可以是 `UNION ALL` 内联表，也可以是 `INSERT INTO ... VALUES`。
 
@@ -30,11 +31,34 @@ python -m pip install -e ".[xls]"
 不安装也可以直接跑：
 
 ```bash
-set PYTHONPATH=src && python -m excel2sql --help      # Windows cmd
-PYTHONPATH=src python -m excel2sql --help             # bash
+# 标准 Python：把 src 加进模块搜索路径
+PYTHONPATH=src python -m excel2sql --help             # bash / macOS / Linux
+set "PYTHONPATH=src" && python -m excel2sql --help    # Windows cmd
+
+# embed 版 Python（带 ._pth，会忽略 PYTHONPATH，需用 runpy 引导）
+python -c "import sys,runpy; sys.path.insert(0, r'<仓库路径>\src'); runpy.run_module('excel2sql', run_name='__main__')" --help
 ```
 
-Windows 下双击 `excel2sql.bat` 即可启动交互向导（脚本会自己设置 `PYTHONPATH`，无需安装）。
+### Windows 双击运行
+
+双击 `excel2sql.bat` 即进入交互向导（**免安装**，直接用仓库里的 `src/`）。它会按下面的顺序自动找 python：
+
+1. 仓库根目录的 `python-path.txt`（一行，写 python.exe 完整路径）
+2. 环境变量 `EXCEL2SQL_PYTHON`
+3. 仓库内的 `.venv\Scripts\python.exe`
+4. `PATH` 里的 `python`（自动跳过 Microsoft Store 的占位程序）
+5. `py -3` 启动器
+6. 常见安装位置：`%LOCALAPPDATA%\Programs\Python\Python3*`、`%ProgramFiles%\Python3*`、`C:\Python3*`、`C:\Python3*`、`C:\Python3*`
+
+如果都找不到（或版本低于 3.9），窗口里会给出具体解决办法。**最省事的办法**是在仓库根建一个 `python-path.txt`：
+
+```text
+C:\Python312\python.exe
+```
+
+> 注意：用记事本保存时编码选 **ANSI**（UTF-8 带 BOM 会让首字符变成乱码，导致路径失效）。`python-path.txt` 属于本机配置，已在 `.gitignore` 里排除。
+>
+> 另外，`excel2sql.bat` 扫描的是**当前目录**——双击时即 bat 所在目录；若那里没有数据文件，向导会提示你输入目标文件夹，也可以直接把 Excel 文件拖到 bat 图标上。
 
 ## 快速开始
 
@@ -210,7 +234,9 @@ SELECT '上海市' || CHR(10) || '浦东新区' AS "收货地址"     -- Oracle 
 ├── docs/
 │   ├── reviews/            # 代码评审记录
 │   └── legacy/             # 0.1.0 单文件脚本归档
-├── excel2sql.bat           # Windows 双击启动
+├── excel2sql.bat           # Windows 双击启动（自动探测 python）
+├── LICENSE                 # MIT
+├── python-path.txt         # 可选：本机 python 路径（已 gitignore）
 └── pyproject.toml
 ```
 
@@ -236,4 +262,4 @@ python -m pytest                  # 或 python -m unittest discover -s tests
 
 ## 许可
 
-尚未选定 License，使用/分发前请先与作者确认。
+[MIT License](LICENSE) © 2026 delux2557 —— 可自由使用、修改、分发，保留版权声明即可。

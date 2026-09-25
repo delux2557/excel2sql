@@ -18,6 +18,10 @@
 - **`--encoding utf-8-sig`**：解决老版本 SSMS 打开 UTF-8 无 BOM 文件中文乱码
 - **`--force`**：非交互模式下允许自动修复表头后继续
 - **跨平台剪贴板**：Windows `Set-Clipboard` / macOS `pbcopy` / Linux `wl-copy`·`xclip`·`xsel`
+- **MIT License**（`LICENSE`），`pyproject.toml` 同步声明 license 与 classifier
+- **`excel2sql.bat` 自动探测 python**：依次尝试 `python-path.txt` → `EXCEL2SQL_PYTHON` → 仓库 `.venv`
+  → `PATH`（跳过 Microsoft Store 占位程序）→ `py -3` → 常见安装目录（含 `C:\Python3*`、`C:\Python3*`），
+  并检查版本 ≥ 3.9；全部失败时打印三种配置办法
 
 ### 安全
 
