@@ -1,0 +1,239 @@
+# excel2sql
+
+[![CI](https://github.com/delux2557/excel2sql/actions/workflows/ci.yml/badge.svg)](https://github.com/delux2557/excel2sql/actions/workflows/ci.yml)
+
+把 Excel / CSV 的每一行转成**可直接执行的硬编码 SQL**：既可以是 `UNION ALL` 内联表，也可以是 `INSERT INTO ... VALUES`。
+
+适合的场景：临时把几十到几千行数据贴进数据库做**测试、修数、造 mock**。不适合生产批量导入——那种场景请用数据库原生的 `BULK INSERT` / `LOAD DATA` / `COPY`（见[大数据量建议](#大数据量建议)）。
+
+## 特性
+
+- **交互式向导**：自动扫描当前目录 → 编号选文件 / 选 sheet → 表头校验 → 选方言 → 生成，全程有默认值可回车
+- **完全非交互模式**：给定文件参数后不再有任何 `input()`，可安全用于批处理与 CI
+- **多方言**：SQL Server / MySQL / Oracle / PostgreSQL，标识符引用、字符串转义、日期包装、换行拼接各不相同
+- **表头体检**：识别空列名、重复列名、"表头其实是数据行"，可自动修复（`col_N` / `_2` 后缀）
+- **列级类型统一**：同列混了数字和字符串时整列字符串化，避免 `UNION ALL` 触发隐式转换报错或算术溢出
+- **转义安全**：列名按方言转义内部引号，字符串转义单引号（MySQL 额外处理反斜杠），避免列名/单元格内容破坏 SQL 结构
+- **大表友好**：流式写文件，不把整份 SQL 拼在内存里；超阈值提醒改用 `INSERT` 分批
+- **跨平台剪贴板**：生成后可直接复制到剪贴板（Windows / macOS / Linux）
+
+## 安装
+
+```bash
+# 源码目录内开发式安装（推荐）
+python -m pip install -e .
+
+# 需要读老式 .xls 时
+python -m pip install -e ".[xls]"
+```
+
+不安装也可以直接跑：
+
+```bash
+set PYTHONPATH=src && python -m excel2sql --help      # Windows cmd
+PYTHONPATH=src python -m excel2sql --help             # bash
+```
+
+Windows 下双击 `excel2sql.bat` 即可启动交互向导（脚本会自己设置 `PYTHONPATH`，无需安装）。
+
+## 快速开始
+
+### 交互式
+
+```bash
+excel2sql
+```
+
+```
+============================================================
+  excel2sql  |  Excel / CSV  ->  硬编码 SQL（UNION ALL / INSERT）
+============================================================
+
+发现 3 个文件（目录：D:\data）
+   1. 订单明细.xlsx   (1,204 KB)
+   2. superstore-sample.csv   (8 KB)
+   3. 参数表.csv   (2 KB)
+输入编号 或直接粘贴路径 (q 退出): 2
+读取：D:\data\superstore-sample.csv
+  唯一 sheet：superstore-sample
+表头在第几行 [1]:
+  表头校验通过：24 列 / 30 行数据
+
+SQL 方言： 1=SQL Server   2=MySQL   3=Oracle   4=PostgreSQL
+选择 [1]:
+
+输出形式  1=CTE 包裹(可直接跑)  2=纯 UNION ALL 块  3=INSERT INTO ... VALUES [1]:
+内联表名 [HARDCODE]:
+空字符串按 NULL 处理？y/N [N]:
+
+输出文件路径 [D:\data\superstore-sample_superstore_sample_hardcode.sql]:
+文件编码（SSMS 老版本中文乱码时用 utf-8-sig） [utf-8]:
+
+[OK] 30 行 x 24 列 -> D:\data\superstore-sample_superstore_sample_hardcode.sql   (24 KB)
+预览：
+  SELECT N'40098' AS [行 ID], N'CA-2014-AB10015140-41954' AS [订单 ID], N'2024-11-11 00:00:00' AS [订购日期], ...
+```
+
+### 非交互（脚本 / CI）
+
+```bash
+# SQL Server，CTE 内联表
+excel2sql examples/superstore-sample.csv -o out.sql
+
+# MySQL，改成 INSERT 分批，空串按 NULL
+excel2sql examples/superstore-sample.csv -d mysql --format insert --empty-as-null -o out.sql
+
+# Oracle，只要纯 UNION ALL 块（方便嵌进已有 SQL）
+excel2sql examples/superstore-sample.csv -d oracle --wrap plain -o out.sql
+
+# CSV，表头在第 2 行，分号分隔
+excel2sql data.csv --header-row 2 --delimiter ";" -o out.sql
+```
+
+## 命令行参数
+
+| 参数 | 说明 |
+|---|---|
+| `FILE` | 源文件；**省略则进入交互向导** |
+| `-s, --sheet NAME` | 工作表名（多 sheet 时必填，否则报错并列出可选值） |
+| `-o, --out PATH` | 输出路径，默认 `<文件名>_<sheet>_hardcode.sql` |
+| `-d, --dialect NAME` | `sqlserver`(默认) / `mysql` / `oracle` / `postgresql`，也可用 `1`~`4` |
+| `--header-row N` | 表头行号，从 1 开始，默认 1 |
+| `--format union\|insert` | 输出格式，默认 `union` |
+| `--wrap cte\|plain` | `union` 模式下是否用 `WITH ... AS (...)` 包裹，默认 `cte` |
+| `--table NAME` | 内联表名，默认 `HARDCODE` |
+| `--empty-as-null` | 空字符串按 `NULL` 输出 |
+| `--all-string` | 所有列强制按字符串输出 |
+| `--batch-size N` | `insert` 模式每批行数，默认 500 |
+| `--encoding ENC` | 输出文件编码，默认 `utf-8`（老版 SSMS 用 `utf-8-sig`） |
+| `--input-encoding ENC` | CSV 输入编码，默认自动尝试 `utf-8-sig → gb18030 → utf-8 → gbk` |
+| `--delimiter CHAR` | CSV 分隔符，默认在 `, ; \t \|` 中自动选切分最细的 |
+| `--force` | 非交互模式下，表头不规范也自动修复并继续 |
+| `-V, --version` | 版本号 |
+
+**退出码**：`0` 成功；`1` 一般错误（读不到文件、sheet 不存在、参数非法）；`2` 表头不规范且未加 `--force`。
+
+## 输出格式
+
+`union` + `cte`（默认）：
+
+```sql
+WITH [HARDCODE] AS (
+SELECT N'一级' AS [装运方式], N'消费者' AS [细分市场]
+UNION ALL
+SELECT N'二级' AS [装运方式], N'公司' AS [细分市场]
+)
+SELECT * FROM [HARDCODE];
+```
+
+`insert`：
+
+```sql
+INSERT INTO [HARDCODE] ([装运方式], [细分市场]) VALUES
+('一级', '消费者'),
+('二级', '公司');
+```
+
+多行文本单元格会被拼成单行表达式，避免一条 `SELECT` 被换行截断：
+
+```sql
+SELECT N'上海市' + CHAR(10) + N'浦东新区' AS [收货地址]   -- SQL Server
+SELECT CONCAT('上海市', CHAR(10), '浦东新区') AS `收货地址` -- MySQL
+SELECT '上海市' || CHR(10) || '浦东新区' AS "收货地址"     -- Oracle / PostgreSQL
+```
+
+## 类型与空值规则
+
+| 情况 | 输出 |
+|---|---|
+| 空单元格（Excel 的 `None`、pandas 的 `NaN`） | `NULL` |
+| 空字符串 | `''`，加 `--empty-as-null` 后变 `NULL` |
+| 数字 | 原样，如 `25`、`62.9`；`NaN`/`inf` → `NULL` |
+| 日期 | `'2026-09-08'`（Oracle 为 `TO_DATE(...,'YYYY-MM-DD')`） |
+| 日期时间 | `'2026-09-08 08:25:46'`（Oracle 为 `TO_DATE(...,'YYYY-MM-DD HH24:MI:SS')`） |
+| 布尔 | `'1'` / `'0'` |
+| **同列混有数字和字符串** | 整列按字符串输出（避免 `UNION ALL` 类型冲突） |
+| 加了 `--all-string` | 所有非空值都按字符串输出 |
+
+> 为什么必须做列级统一：SQL Server 会按数据类型优先级把 `nvarchar` 隐式转成 `int`，于是 `'t'` 报 `Conversion failed`、`7900454710` 直接算术溢出。
+
+## 各方言差异
+
+| | SQL Server | MySQL | Oracle | PostgreSQL |
+|---|---|---|---|---|
+| 标识符 | `[col]`，`]`→`]]` | `` `col` ``，`` ` ``→` `` ` `` | `"col"`，`"`→`""` | `"col"`，`"`→`""` |
+| 字符串前缀 | `N'...'` | `'...'` | `'...'` | `'...'` |
+| 单引号转义 | `''` | `''` | `''` | `''` |
+| 反斜杠 | 无特殊含义 | **额外转义为 `\\`** | 无特殊含义 | 无特殊含义 |
+| 拼接 | `+` | `CONCAT(...)` | `\|\|` | `\|\|` |
+| 换行 | `CHAR(10)` | `CHAR(10)` | `CHR(10)` | `CHR(10)` |
+| 日期 | 隐式转换 | 隐式转换 | `TO_DATE(...)` | 隐式转换 |
+| 无表查询 | 不需要 `FROM` | 不需要 | `FROM dual` | 不需要 |
+
+## 表头体检
+
+生成前会检查表头，命中任意一条即提示（交互模式可确认后继续，非交互模式需加 `--force`）：
+
+- 表头有空列 → 自动命名为 `col_2`、`col_5`……
+- 列名重复（大小写不敏感）→ 自动加 `_2`、`_3` 后缀，且保证结果全局唯一
+- 表头行**全是数字或日期** → 高度怀疑表头不在这一行，请改 `--header-row N`
+- 表头下方**没有任何数据行** → 直接判定无法转换
+
+## 安全说明
+
+生成的 SQL 里所有标识符和字符串都按方言做了转义，因此**不可信的列名或单元格内容不会破坏 SQL 结构**。例如 SQL Server 列名 `a] FROM x; DROP TABLE y; --` 会被写成 `[a]] FROM x; DROP TABLE y; --]`，仍是一个合法的列名。
+
+不过仍请注意：输出的 SQL 是**纯文本可信脚本**，其中的数据内容来自你的表格，请勿对来源不明的文件直接在生产库执行。
+
+## 大数据量建议
+
+| 行数 | 建议 |
+|---|---|
+| < 2000 | `UNION ALL` 完全够用，方言兼容性最好 |
+| 2000 ~ 20000 | 用 `--format insert --batch-size 500`，解析开销小很多 |
+| > 20000 | 别用本工具导入。改用数据库原生通道：SQL Server `BULK INSERT`/`bcp`、MySQL `LOAD DATA INFILE`、Oracle `SQL*Loader`/外部表、PostgreSQL `COPY` |
+| > 200000 | 工具会直接拒绝，避免生成一个谁也打不开的 SQL 文件 |
+
+## 目录结构
+
+```
+.
+├── src/excel2sql/          # 包源码
+│   ├── cli.py              # 命令行入口：交互向导 + 批处理
+│   ├── reader.py           # Excel/CSV 读取与编码、分隔符探测
+│   ├── headers.py          # 表头校验与修复
+│   ├── sqlgen.py           # 字面量渲染与 SQL 生成
+│   ├── dialects.py         # 各方言规则
+│   └── clipboard.py        # 跨平台剪贴板
+├── tests/                  # pytest / unittest 均可跑
+├── examples/               # 示例数据（可直接喂给 CLI）
+├── docs/
+│   ├── reviews/            # 代码评审记录
+│   └── legacy/             # 0.1.0 单文件脚本归档
+├── excel2sql.bat           # Windows 双击启动
+└── pyproject.toml
+```
+
+## 开发
+
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest                  # 或 python -m unittest discover -s tests
+```
+
+测试不依赖网络，xlsx 用例会在运行时用 openpyxl 现场生成临时文件。
+
+## 已知限制
+
+- 不含 xlsb / ods / parquet 支持
+- `.xls`、`.xlsm` 依赖可选包（`pandas`+`xlrd` / `openpyxl`）
+- 一个 sheet 只处理一张连续表，不支持多块表头或合并单元格的"花式"版式
+- 超宽表（几百列）生成的 SQL 单行会很长，部分客户端显示吃力
+
+## 变更记录
+
+见 [CHANGELOG.md](CHANGELOG.md)。0.2.0 相对 0.1.0 的完整改动与评审来源见 [docs/reviews/review-01-代码评审.md](docs/reviews/review-01-代码评审.md)。
+
+## 许可
+
+尚未选定 License，使用/分发前请先与作者确认。

@@ -1,0 +1,108 @@
+"""SQL 方言定义：标识符引用、字符串转义、日期包装、换行拼接。"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict
+
+
+@dataclass(frozen=True)
+class Dialect:
+    """一种 SQL 方言的字面量/标识符规则。"""
+
+    key: str
+    name: str
+    ident_open: str
+    ident_close: str
+    string_prefix: str = ''
+    concat: str = 'plus'          # plus: a + b | pipe: a || b | func: CONCAT(a, b)
+    newline_expr: str = 'CHAR(10)'
+    date_prefix: str = ''
+    date_suffix: str = ''
+    datetime_prefix: str = ''
+    datetime_suffix: str = ''
+    dual: str = ''
+    backslash_escape: bool = False
+
+    # -- 标识符 --
+    def quote_ident(self, name: object) -> str:
+        """引用列名/表名，并转义内部引号（防语法破坏与注入）。"""
+        if self.ident_open == '[':
+            inner = str(name).replace(']', ']]')
+        elif self.ident_open == '`':
+            inner = str(name).replace('`', '``')
+        else:                                     # 标准双引号方言
+            inner = str(name).replace('"', '""')
+        return '{}{}{}'.format(self.ident_open, inner, self.ident_close)
+
+    # -- 字符串 --
+    def quote_string(self, body: str) -> str:
+        """单行字符串字面量（不含换行）。"""
+        s = body
+        if self.backslash_escape:                 # MySQL 默认把 \\ 当转义符
+            s = s.replace('\\', '\\\\')
+        s = s.replace("'", "''")
+        return "{}'{}'".format(self.string_prefix, s)
+
+    def concat_strings(self, segments, newline_expr: str) -> str:
+        """把多行文本拼成单个表达式。"""
+        parts = []
+        for i, seg in enumerate(segments):
+            if i:
+                parts.append(newline_expr)
+            parts.append(seg)
+        if self.concat == 'func':
+            return 'CONCAT({})'.format(', '.join(parts))
+        op = ' || ' if self.concat == 'pipe' else ' + '
+        return op.join(parts)
+
+    @property
+    def date_format(self) -> str:
+        return 'YYYY-MM-DD'
+
+    @property
+    def datetime_format(self) -> str:
+        return 'YYYY-MM-DD HH24:MI:SS'
+
+
+SQLSERVER = Dialect(
+    key='sqlserver', name='SQL Server', ident_open='[', ident_close=']',
+    string_prefix='N', concat='plus', newline_expr='CHAR(10)',
+)
+
+MYSQL = Dialect(
+    key='mysql', name='MySQL', ident_open='`', ident_close='`',
+    string_prefix='', concat='func', newline_expr='CHAR(10)',
+    backslash_escape=True,
+)
+
+ORACLE = Dialect(
+    key='oracle', name='Oracle', ident_open='"', ident_close='"',
+    string_prefix='', concat='pipe', newline_expr='CHR(10)',
+    # 前后缀不含引号：字面量由 quote_string 负责加引号
+    date_prefix='TO_DATE(', date_suffix=",'YYYY-MM-DD')",
+    datetime_prefix='TO_DATE(', datetime_suffix=",'YYYY-MM-DD HH24:MI:SS')",
+    dual=' FROM dual',
+)
+
+POSTGRESQL = Dialect(
+    key='postgresql', name='PostgreSQL', ident_open='"', ident_close='"',
+    string_prefix='', concat='pipe', newline_expr='CHR(10)',
+)
+
+DIALECTS: Dict[str, Dialect] = {d.key: d for d in (SQLSERVER, MYSQL, ORACLE, POSTGRESQL)}
+
+# 命令行/交互输入的别名 -> 方言 key
+ALIASES = {
+    '1': 'sqlserver', 'sqlserver': 'sqlserver', 'mssql': 'sqlserver',
+    '2': 'mysql', 'mysql': 'mysql', 'mariadb': 'mysql',
+    '3': 'oracle', 'oracle': 'oracle', 'ora': 'oracle',
+    '4': 'postgresql', 'postgresql': 'postgresql', 'postgres': 'postgresql', 'pg': 'postgresql',
+}
+
+MENU = '   '.join('{}={}'.format(k, DIALECTS[k].name) for k in ('sqlserver', 'mysql', 'oracle', 'postgresql'))
+NUMBERED = {'1': 'sqlserver', '2': 'mysql', '3': 'oracle', '4': 'postgresql'}
+
+
+def resolve(value: str) -> Dialect:
+    """把 '-d 1' / 'mysql' / 'PostgreSQL' 统一解析成 Dialect；无法识别时返回 SQL Server。"""
+    return DIALECTS[ALIASES.get(str(value).strip().lower(), 'sqlserver')]

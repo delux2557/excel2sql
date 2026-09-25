@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "excel2sql"
+version = "0.2.0"
+description = "把 Excel / CSV 的每一行转成硬编码 SQL（UNION ALL 内联表 / INSERT VALUES）"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "delux2557", email = "85469583+delux2557@users.noreply.github.com" }]
+keywords = ["excel", "csv", "sql", "union-all", "insert", "sqlserver", "mysql", "oracle", "postgresql"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Utilities",
+]
+dependencies = ["openpyxl>=3.0"]
+
+[project.optional-dependencies]
+xls = ["pandas>=1.3", "xlrd>=2.0"]
+dev = ["pytest>=7.0", "build>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/delux2557/excel2sql"
+
+[project.scripts]
+excel2sql = "excel2sql.cli:main"
+# 兼容 0.1.0 的单文件脚本名，老命令仍可用
+xlsx2sql = "excel2sql.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

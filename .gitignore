@@ -1,0 +1,34 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- 编辑器 / 系统 ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- 本项目产物 ---
+# 生成的 SQL 与中间结果不入库（可复现即可）
+*_hardcode.sql
+out.sql
+
+# --- 本地素材（体积大，不入库；放到 示例数据/ 自行取用）---
+示例数据/
+*.xlsx
+*.xls
+!examples/*.csv
+~$*
