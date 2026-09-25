@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from excel2sql import dialects
+from excel2sql import dialects, sqlgen
 from excel2sql.sqlgen import SqlGenError, SqlOptions, build_sql, write_sql
 
 
@@ -252,6 +252,45 @@ class TestWrite(unittest.TestCase):
             out = Path(d) / 'x.sql'
             write_sql(out, ['列'], [[1]], opts())
             self.assertFalse(out.read_bytes().startswith(b'\xef\xbb\xbf'))
+
+
+class TestRendererRegistry(unittest.TestCase):
+    """渲染器注册表：加一种输出写法 = 加一个函数 + 注册一行。"""
+
+    def test_registry_keys_match_declared_formats(self):
+        self.assertEqual(tuple(sqlgen.RENDERERS), sqlgen.FORMATS)
+
+    def test_every_renderer_is_callable(self):
+        for name, fn in sqlgen.RENDERERS.items():
+            with self.subTest(fmt=name):
+                self.assertTrue(callable(fn))
+
+    def test_render_delegates_and_keeps_header_comments(self):
+        """分派器必须自己产出头注释，否则改写法会静默丢掉告警。"""
+        sql = build_sql(['文字'], [['x']], opts())
+        self.assertIn('-- 由 excel2sql 生成：1 行 x 1 列', sql)
+        self.assertIn('-- 方言：SQL Server', sql)
+        self.assertIn('按字符串输出的列', sql)
+
+    def test_header_comments_are_shared_by_both_renderers(self):
+        """两种写法的头注释只有「输出格式」那一行不同 —— 公共部分不允许各写一份。"""
+        def head(s):
+            return [l for l in s.split('\n') if l.startswith('--')]
+
+        union = head(build_sql(['a'], [[1]], opts(fmt='union')))
+        insert = head(build_sql(['a'], [[1]], opts(fmt='insert')))
+
+        self.assertEqual(len(union), len(insert))
+        self.assertIn('输出格式：union', union[1])
+        self.assertIn('输出格式：insert', insert[1])
+        self.assertEqual(union[:1] + union[2:], insert[:1] + insert[2:])
+
+    def test_non_sql_carrier_is_still_rejected(self):
+        """json/csv 是另一个载体，不是 format 的取值 —— 这一层语义要守住。"""
+        for carrier in ('json', 'csv', 'ddl', 'orm'):
+            with self.subTest(fmt=carrier):
+                with self.assertRaises(SqlGenError):
+                    SqlOptions(dialect=dialects.SQLSERVER, fmt=carrier)
 
 
 if __name__ == '__main__':
