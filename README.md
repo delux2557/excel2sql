@@ -135,7 +135,7 @@ excel2sql data.csv --header-row 2 --delimiter ";" -o out.sql
 | `FILE` | 源文件；**省略则进入交互向导** |
 | `-s, --sheet NAME` | 工作表名（多 sheet 时必填，否则报错并列出可选值） |
 | `-o, --out PATH` | 输出路径；**显式指定则按原样写入**（可覆盖），不指定则按配置的 `output_dir` 生成并防冲突 |
-| `-d, --dialect NAME` | `sqlserver` / `mysql` / `oracle` / `postgresql` / `sqlite`，也可用 `1`~`5` |
+| `-d, --dialect NAME` | `sqlserver` / `mysql` / `oracle` / `postgresql` / `sqlite`，也可用 `1`~`5`（也接受 `mssql`/`mariadb`/`pg`/`ora`/`sqlite3` 等别名）。**无法识别即报错退出，不会静默回退成别的方言** |
 | `--header-row N` | 表头行号；`auto`（默认）表示自动识别 |
 | `--format union\|insert` | 输出格式 |
 | `--wrap cte\|plain` | `union` 模式下是否用 `WITH ... AS (...)` 包裹 |
@@ -380,7 +380,6 @@ SQLite 用例用的是标准库 `sqlite3`，所以「生成 → 灌库 → 读�
 - 超宽表（几百列）生成的 SQL 单行会很长，部分客户端显示吃力
 - 数字类型推断的边界：**能无损装进 64 位整数的编号仍会被转成数字**（如 11 位手机号）。
   要保住这类列用 `--no-infer-types`，或让编号带前导零
-- `-d` 传入无法识别的方言名会**静默回退成 SQL Server**（拼错就是错的方言，且不会报错）
 
 ## 变更记录
 
