@@ -94,6 +94,47 @@ class TestArgumentValidation(unittest.TestCase):
         self.assertEqual(code, EXIT_ERROR)
         self.assertIn('文件不存在', err)
 
+    def test_unknown_dialect_is_rejected(self):
+        """`-d myslq` 以前会静默生成 SQL Server 的 SQL —— 方言错了却不报错。"""
+        with _Sandbox(self) as root:
+            out = root / 'o.sql'
+            code, _, err = run([str(make_csv(root)), '-d', 'db2', '-o', str(out)])
+            self.assertEqual(code, EXIT_ERROR)
+            self.assertIn('db2', err)
+            self.assertIn('sqlite', err)              # 报错里要列全可选值
+            self.assertFalse(out.exists())            # 且不该留下半份产物
+
+    def test_empty_dialect_value_is_rejected(self):
+        """shell 里 `-d "$DIALECT"` 而变量为空，以前会静默改用配置里的方言。"""
+        with _Sandbox(self) as root:
+            code, _, err = run([str(make_csv(root)), '-d', '', '-o', str(root / 'o.sql')])
+            self.assertEqual(code, EXIT_ERROR)
+            self.assertIn('--dialect', err)
+
+    def test_valid_dialect_spellings_still_work(self):
+        with _Sandbox(self) as root:
+            for value in ('pg', 'SQLITE', '4', '  mysql  '):
+                with self.subTest(dialect=value):
+                    code, _, err = run([str(make_csv(root)), '-d', value,
+                                        '-o', str(root / 'o.sql')])
+                    self.assertEqual(code, EXIT_OK, err)
+
+    def test_bad_dialect_in_config_names_its_source(self):
+        with _Sandbox(self) as root:
+            (root / 'excel2sql.ini').write_text('[output]\ndialect = psql\n', encoding='utf-8')
+            code, _, err = run([str(make_csv(root)), '-o', str(root / 'o.sql')])
+            self.assertEqual(code, EXIT_ERROR)
+            self.assertIn('配置项 dialect', err)
+
+    def test_cli_dialect_wins_over_a_broken_config_value(self):
+        """只校验**将会生效**的那个：命令行明确指定了方言，就不该被配置里的旧值拦住。"""
+        with _Sandbox(self) as root:
+            (root / 'excel2sql.ini').write_text('[output]\ndialect = psql\n', encoding='utf-8')
+            out = root / 'o.sql'
+            code, _, err = run([str(make_csv(root)), '-d', 'mysql', '-o', str(out)])
+            self.assertEqual(code, EXIT_OK, err)
+            self.assertIn('`', out.read_text(encoding='utf-8'))      # MySQL 的反引号
+
 
 class TestNonInteractiveContract(unittest.TestCase):
     """评审第 7 条：带文件参数时不该再有任何交互。"""

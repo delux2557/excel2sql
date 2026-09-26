@@ -63,9 +63,39 @@ class TestResolve(unittest.TestCase):
         self.assertIs(dialects.resolve('MySQL'), dialects.MYSQL)
         self.assertIs(dialects.resolve('ORA'), dialects.ORACLE)
         self.assertIs(dialects.resolve('pg'), dialects.POSTGRESQL)
+        self.assertIs(dialects.resolve('5'), dialects.SQLITE)
 
-    def test_unknown_falls_back_to_sqlserver(self):
-        self.assertIs(dialects.resolve('db2'), dialects.SQLSERVER)
+    def test_case_and_surrounding_space_are_tolerated(self):
+        self.assertIs(dialects.resolve('  MySQL  '), dialects.MYSQL)
+        self.assertIs(dialects.resolve('SQLITE'), dialects.SQLITE)
+
+    def test_unknown_raises_instead_of_silently_using_sqlserver(self):
+        """静默回退是最坏的一类失败：产物语法完全正确、只是方言错了。
+
+        这种错往往要到灌库时才暴露，更糟的是被隐式转换掩盖过去，看着像"跑通了"。
+        """
+        for value in ('db2', 'psql', 'sqlite4', 'mssql2', '', '   '):
+            with self.subTest(value=value):
+                with self.assertRaises(dialects.UnknownDialect):
+                    dialects.resolve(value)
+
+    def test_error_message_tells_you_what_is_valid(self):
+        with self.assertRaises(dialects.UnknownDialect) as ctx:
+            dialects.resolve('db2')
+        msg = str(ctx.exception)
+        self.assertIn("'db2'", msg)
+        for key in dialects.ORDER:
+            self.assertIn(key, msg)              # 每个正式名都要列出来
+        self.assertIn('pg', msg)                 # 以及常用别名
+
+    def test_alias_hint_is_derived_from_aliases(self):
+        """别名提示从 ALIASES 派生 —— 加别名不会漏掉提示。"""
+        for name in dialects.EXTRA_ALIASES:
+            with self.subTest(alias=name):
+                self.assertIn(name, dialects.ALIASES)
+                self.assertNotIn(name, dialects.ORDER)       # 正式名不重复出现
+                self.assertNotIn(name, dialects.NUMBERED)    # 编号也不重复出现
+        self.assertIn('pg', dialects.EXTRA_ALIASES)
 
 
 class TestDateFormats(unittest.TestCase):

@@ -18,7 +18,7 @@ from .clipboard import copy_text
 from .config import (ConfigError, INFER_AUTO, INFER_OFF, INFER_ON, Settings,
                      unique_path, write_template)
 from .config import load as load_settings
-from .dialects import DIALECTS, resolve
+from .dialects import DIALECTS, UnknownDialect, resolve
 from .dialects import ORDER as DIALECT_ORDER
 from .headers import check as check_header
 from .headers import detect as detect_header, is_blank, repair
@@ -109,10 +109,15 @@ def ask_dialect(default_key: str) -> str:
         mark = '    ← 当前配置' if key == default_key else ''
         print('  {}. {}{}'.format(i, DIALECTS[key].name, mark))
     default_index = str(DIALECT_ORDER.index(default_key) + 1) if default_key in DIALECT_ORDER else '1'
-    raw = ask('选择', default_index)
-    if raw.isdigit() and 1 <= int(raw) <= len(DIALECT_ORDER):
-        return DIALECT_ORDER[int(raw) - 1]
-    return resolve(raw).key          # 也允许直接输名字，如 mysql
+    while True:
+        raw = ask('选择（编号，或直接输名字如 pg）', default_index)
+        if raw.isdigit() and 1 <= int(raw) <= len(DIALECT_ORDER):
+            return DIALECT_ORDER[int(raw) - 1]
+        try:
+            return resolve(raw).key          # 也允许直接输名字，如 mysql
+        except UnknownDialect as e:
+            # 交互里打错字不该崩，也不该悄悄用默认方言 —— 说清楚再问一次
+            print('  ! {}'.format(e))
 
 
 def ask_format(default_fmt: str, default_wrap: str) -> Tuple[str, str]:
@@ -185,6 +190,28 @@ def choose_header_row(sheet: Sheet, suggested: int) -> int:
 
 
 # ------------------------------------------------------------------ 选项合并
+def check_dialect(args: argparse.Namespace, settings: Settings) -> Optional[str]:
+    """校验**将会生效**的那个方言名，返回错误信息（None 表示没问题）。
+
+    只校验会真正用到的那个：命令行给了 `-d` 就以它为准，配置里的旧值不再追究
+    （那是另一回事，不该拦住一次明确指定了方言的调用）。
+
+    ★ 校验放在**读文件之前**：51,290 行的表读进来才发现方言拼错，白等几十秒。
+
+    ★ 用 `is not None` 而不是真假判断来区分「没给 -d」与「给了 -d 但值为空」：
+      shell 里写 `-d "$DIALECT"` 而变量为空，恰恰是最容易静默用错方言的场景。
+    """
+    if args.dialect is not None:
+        source, value = '--dialect', args.dialect
+    else:
+        source, value = '配置项 dialect', settings.dialect
+    try:
+        resolve(value)
+    except UnknownDialect as e:
+        return '{} {}'.format(source, e)
+    return None
+
+
 def resolve_infer_types(args: argparse.Namespace, settings: Settings,
                         source_path=None) -> bool:
     """把 auto / on / off 解析成确定的布尔。
@@ -210,7 +237,8 @@ def resolve_infer_types(args: argparse.Namespace, settings: Settings,
 def merge_options(args: argparse.Namespace, settings: Settings,
                   source_path=None) -> SqlOptions:
     """命令行参数 > 配置文件 > 内置默认。"""
-    dialect = resolve(args.dialect).key if args.dialect else settings.dialect
+    # is not None：`-d ''` 要当成「给了一个非法值」报错，不能当成「没给」而悄悄用配置值
+    dialect = resolve(args.dialect).key if args.dialect is not None else settings.dialect
     fmt = args.fmt or settings.format
     wrap = args.wrap or settings.wrap
     empty_as_null = settings.empty_as_null if args.empty_as_null is None else args.empty_as_null
@@ -511,7 +539,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('-s', '--sheet', help='工作表名（多 sheet 时必须指定）')
     p.add_argument('-o', '--out', help='输出 SQL 路径（默认按配置 output_dir 生成）')
     p.add_argument('-d', '--dialect', metavar='NAME',
-                   help='方言：{}，也可用 1~{}'.format(' / '.join(DIALECT_ORDER), len(DIALECT_ORDER)))
+                   help='方言：{}，也可用 1~{}（无法识别即报错退出，不会静默回退）'.format(
+                       ' / '.join(DIALECT_ORDER), len(DIALECT_ORDER)))
     p.add_argument('--header-row', metavar='N', default=None,
                    help='表头行号；auto（默认）表示自动识别')
     p.add_argument('--format', dest='fmt', choices=('union', 'insert'), help='输出格式')
@@ -586,6 +615,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             except ValueError:
                 print('--header-row 必须是 >= 1 的行号，或 auto', file=sys.stderr)
                 return EXIT_ERROR
+
+    bad_dialect = check_dialect(args, settings)
+    if bad_dialect:
+        print(bad_dialect, file=sys.stderr)
+        return EXIT_ERROR
 
     try:
         if args.file is None:

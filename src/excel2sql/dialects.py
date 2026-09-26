@@ -123,7 +123,29 @@ ORDER = ('sqlserver', 'mysql', 'oracle', 'postgresql', 'sqlite')
 MENU = '   '.join('{}={}'.format(k, DIALECTS[k].name) for k in ORDER)
 NUMBERED = {str(i): k for i, k in enumerate(ORDER, start=1)}
 
+# 除「正式名」与「编号」之外的别名，报错时提示用（从 ALIASES 派生，避免两处各写一份）
+EXTRA_ALIASES = tuple(sorted(k for k in ALIASES if k not in ORDER and k not in NUMBERED))
+
+
+class UnknownDialect(ValueError):
+    """方言名或编号无法识别。"""
+
+
+def choices_text() -> str:
+    """可选值清单（正式名 + 编号），给报错与帮助文案用。"""
+    return ' / '.join('{}({})'.format(k, i) for i, k in enumerate(ORDER, start=1))
+
 
 def resolve(value: str) -> Dialect:
-    """把 '-d 1' / 'mysql' / 'PostgreSQL' 统一解析成 Dialect；无法识别时返回 SQL Server。"""
-    return DIALECTS[ALIASES.get(str(value).strip().lower(), 'sqlserver')]
+    """把 '-d 1' / 'mysql' / 'PostgreSQL' 统一解析成 Dialect。
+
+    ★ 无法识别时**抛 UnknownDialect**，不再静默回退成 SQL Server。
+      静默回退是最坏的一类失败：产物语法完全正确、只是方言错了 ——
+      往往要到灌库时才暴露，更糟的是被隐式转换掩盖过去，看起来"跑通了"。
+      （调用方各自决定怎么办：命令行与配置是报错退出，交互向导是重新询问。）
+    """
+    key = ALIASES.get(str(value).strip().lower())
+    if key is None:
+        raise UnknownDialect('无法识别的方言：{!r}。可选 {}，也接受 {} 等别名'.format(
+            value, choices_text(), ' / '.join(EXTRA_ALIASES)))
+    return DIALECTS[key]
