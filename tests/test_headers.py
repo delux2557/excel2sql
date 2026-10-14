@@ -124,11 +124,126 @@ class TestLooksLikeValue(unittest.TestCase):
         self.assertFalse(headers.looks_like_value(True))
         self.assertFalse(headers.looks_like_value('2026年'))
 
-    def test_is_blank(self):
+
+class TestCleanName(unittest.TestCase):
+    """列名清洗：不可见字符删除、空白折叠成单空格。
+
+    起因（2026-10-14 实测）：列名里的换行会把产物头注释劈成两行，后半行失去
+    `--` 前缀被 SQL 引擎当语句执行 —— 产物直接 `syntax error`。
+    """
+
+    def test_newline_becomes_single_space(self):
+        self.assertEqual(headers.clean_name('订\n单'), '订 单')
+        self.assertEqual(headers.clean_name('订单\r\n编号'), '订单 编号')
+        self.assertEqual(headers.clean_name('单\r价'), '单 价')
+
+    def test_tab_and_vertical_whitespace_become_space(self):
+        self.assertEqual(headers.clean_name('a\tb'), 'a b')
+        self.assertEqual(headers.clean_name('a\vb'), 'a b')
+        self.assertEqual(headers.clean_name('a\fb'), 'a b')
+
+    def test_surrounding_whitespace_is_trimmed(self):
+        self.assertEqual(headers.clean_name(' 数量 '), '数量')
+        self.assertEqual(headers.clean_name('\n金额\n'), '金额')
+        self.assertEqual(headers.clean_name('\t备注\t'), '备注')
+
+    def test_unicode_spaces_become_plain_space(self):
+        """NBSP / 全角空格也是空白，但肉眼与普通空格无异 —— 必须归一。"""
+        self.assertEqual(headers.clean_name('数量\u00a0(件)'), '数量 (件)')
+        self.assertEqual(headers.clean_name('前\u3000后'), '前 后')
+        self.assertEqual(headers.clean_name('a\u2028b'), 'a b')
+
+    def test_runs_of_whitespace_collapse_to_one(self):
+        self.assertEqual(headers.clean_name('多   空格'), '多 空格')
+        self.assertEqual(headers.clean_name('a\n\n  b'), 'a b')
+
+    def test_zero_width_chars_are_deleted_not_spaced(self):
+        """零宽字符不是空白（`isspace()` 为 False），是排版噪声 —— 直接删。
+
+        若折成空格，`x\\u200by` 会变成 `x y`（凭空多一个词），删掉才是 `xy`。
+        """
+        self.assertEqual(headers.clean_name('x\u200by'), 'xy')
+        self.assertEqual(headers.clean_name('\u200b'), '')
+        self.assertEqual(headers.clean_name('\ufeff'), '')       # BOM
+        self.assertEqual(headers.clean_name('\u00ad'), '')       # 软连字符
+
+    def test_control_chars_are_deleted(self):
+        self.assertEqual(headers.clean_name('a\x00b'), 'ab')
+        self.assertEqual(headers.clean_name('a\x07b'), 'ab')
+        self.assertEqual(headers.clean_name('a\x7fb'), 'ab')
+
+    def test_emoji_presentation_selector_is_kept(self):
+        """变体选择符修饰前一个字符的呈现方式，属于**内容**，不能删
+        （删了会把 🗃️ 变成单色字形）。"""
+        self.assertEqual(headers.clean_name('\U0001f5c3\ufe0f'), '\U0001f5c3\ufe0f')
+
+    def test_clean_input_is_untouched(self):
+        for name in ('单价(元)', '2024 年', '订单编号', 'a b', '客户 ID', 'col_2'):
+            with self.subTest(name=name):
+                self.assertEqual(headers.clean_name(name), name)
+
+    def test_result_never_contains_line_breaks(self):
+        dirty = ['订\n单', 'a\r\nb', 'a\tb', 'a\vb', 'a\fb', 'x\u0085y', 'a\u2028b']
+        for name in dirty:
+            with self.subTest(name=name):
+                cleaned = headers.clean_name(name)
+                self.assertFalse(any(c in cleaned for c in '\r\n\t\v\f\u0085\u2028\u2029'),
+                                 '{!r} -> {!r}'.format(name, cleaned))
+
+    def test_is_idempotent(self):
+        for name in ('订\n单', ' 数量 ', '\u200b', 'a\u00a0b', 'x\u200by'):
+            with self.subTest(name=name):
+                once = headers.clean_name(name)
+                self.assertEqual(headers.clean_name(once), once)
+
+    def test_none_and_non_strings(self):
+        self.assertEqual(headers.clean_name(None), '')
+        self.assertEqual(headers.clean_name(2024), '2024')
+        self.assertEqual(headers.clean_name(3.5), '3.5')
+
+
+class TestChangedNames(unittest.TestCase):
+    """清洗必须"看得见" —— 静默修正和静默走偏只差一步。"""
+
+    def test_reports_before_and_after(self):
+        out = headers.changed_names(['订\n单', '数量'], ['订 单', '数量'])
+        self.assertEqual(len(out), 1)
+        self.assertIn('第1列', out[0])
+        self.assertIn('订 单', out[0])
+
+    def test_silent_when_nothing_changed(self):
+        self.assertEqual(headers.changed_names(['a', 'b'], ['a', 'b']), [])
+
+    def test_truncates_and_counts_the_rest(self):
+        raw = ['a\n', 'b\n', 'c\n', 'd\n', 'e\n', 'f\n', 'g\n']
+        cleaned = ['a', 'b', 'c', 'd', 'e', 'f', 'g']
+        out = headers.changed_names(raw, cleaned, limit=3)
+        self.assertEqual(len(out), 4)
+        self.assertIn('另有 4 处', out[-1])
+
+    def test_none_counts_as_change(self):
+        self.assertEqual(len(headers.changed_names([None], ['col_1'])), 1)
+
+
+class TestIsBlank(unittest.TestCase):
+    def test_none_and_whitespace(self):
         self.assertTrue(headers.is_blank(None))
         self.assertTrue(headers.is_blank('   '))
+        self.assertTrue(headers.is_blank('\n'))
+        self.assertTrue(headers.is_blank('\u00a0'))      # NBSP
+        self.assertTrue(headers.is_blank('\u3000'))      # 全角空格
+
+    def test_zero_width_counts_as_blank(self):
+        """★ 修复点：零宽字符/BOM 原先被判为"非空"，于是列名变成看不见的字符，
+        既得不到 col_N 补名，也不会被报成空列（2026-10-14 实测）。"""
+        for v in ('\u200b', '\ufeff', '\u200c', '\u00ad', '\x00'):
+            with self.subTest(value=repr(v)):
+                self.assertTrue(headers.is_blank(v))
+
+    def test_zero_and_false_are_not_blank(self):
         self.assertFalse(headers.is_blank(0))
         self.assertFalse(headers.is_blank('0'))
+        self.assertFalse(headers.is_blank(False))
 
 
 if __name__ == '__main__':

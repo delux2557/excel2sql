@@ -9,6 +9,7 @@
 """
 import io
 import os
+import sqlite3
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -356,6 +357,130 @@ class TestNumericSafetyBoundary(unittest.TestCase):
         without = sqlgen.build_sql(['a', 'b'], rows, sqlgen.SqlOptions(**base))
         self.assertIn('1 AS [a]', without)
         self.assertIn('NULL AS [a], N\'y\' AS [b]', without)   # 数字列里的空格 -> NULL
+
+
+@unittest.skipIf(openpyxl is None, '需要 openpyxl')
+class TestDirtyHeaderNames(unittest.TestCase):
+    """列名里的换行/不可见字符 —— 2026-10-14 实测的 P0。
+
+    原先的产物**根本跑不了**：头注释里「按字符串输出的列」清单含换行，注释被劈成
+    两行，后半行失去 `--` 前缀被 SQL 引擎当成语句 → `syntax error`。
+
+    修复前三条铁证（把产物灌进 SQLite）：
+        a_nl.xlsx        OperationalError: near "编号": syntax error
+        e_comment.xlsx   OperationalError: near "门": syntax error
+        c_invisible.xlsx OperationalError: near "AS": syntax error
+
+    ★ 验收标准就一条：**产物能被真正执行**。所以这里不用文本断言，直接跑。
+    用 `-d sqlite` 出产物，因为它可以被标准库 sqlite3 直接执行（其余方言要外部容器）。
+    """
+
+    def setUp(self):
+        self._ctx = _Dir()
+        self.root = self._ctx.__enter__()
+
+    def tearDown(self):
+        self._ctx.__exit__(None, None, None)
+
+    def _product(self, rows, name='dirty.xlsx', force=False):
+        """生成 SQLite 方言的产物，返回 (产物文本, stderr)。"""
+        src = write_xlsx(self.root, name, rows)
+        out = self.root / 'o.sql'
+        argv = [str(src), '-d', 'sqlite', '--header-row', '1',
+                '-o', str(out), '--no-copy-clipboard']
+        if force:
+            argv.append('--force')
+        code, _, err = run(argv)
+        self.assertEqual(code, EXIT_OK, err)
+        return out.read_text(encoding='utf-8'), err
+
+    @staticmethod
+    def _load(sql):
+        """去注释后灌进内存库，返回 (列名, 连接)。"""
+        body = '\n'.join(l for l in sql.split('\n') if not l.startswith('--'))
+        conn = sqlite3.connect(':memory:')
+        conn.executescript('CREATE TABLE loaded AS ' + body.strip())
+        cols = [d[0] for d in conn.execute('SELECT * FROM loaded').description]
+        return cols, conn
+
+    def test_header_with_newline_produces_executable_sql(self):
+        sql, _ = self._product([['订单\n编号', '数量'], ['A001', 2]])
+        cols, _ = self._load(sql)
+        self.assertEqual(cols, ['订单 编号', '数量'])
+
+    def test_header_comment_is_never_split(self):
+        """头注释必须整行 —— 否则那半行会被当语句执行（这正是 P0 的成因）。"""
+        sql, _ = self._product([['部\n门', '细\n分'], ['一级', '消费者']])
+        self.assertIn('-- 按字符串输出的列（源数据是文本（CSV 无类型信息））：部 门, 细 分', sql)
+        for line in sql.split('\n'):
+            self.assertNotIn('部\n', line)
+
+    def test_product_has_no_orphan_lines(self):
+        """产物里每一行要么是注释、要么是 SQL —— 不该出现"孤儿列名行"。"""
+        sql, _ = self._product([['订单\n编号', '备注'], ['A001', 'x']])
+        for line in sql.split('\n'):
+            if not line.strip():
+                continue
+            self.assertTrue(
+                line.lstrip().startswith('--')
+                or any(k in line for k in ('WITH', 'SELECT', 'UNION ALL', ')')),
+                '可疑行：{!r}'.format(line))
+
+    def test_invisible_header_is_surfaced_then_fixed(self):
+        """零宽字符/BOM 当列名：原先产出**看不见的列名**（rc=0、无任何提示）。
+
+        现在它是"空列"→ 报出来并以 rc=2 拦下；加 `--force` 后补成 col_N。
+        与真正空列的处理保持一致，关键是**不再静默**。
+        """
+        src = write_xlsx(self.root, 'inv.xlsx',
+                         [['订单编号', '\u200b', '\ufeff'], ['A001', 2, 3]])
+        out = self.root / 'inv.sql'
+        code, _, err = run([str(src), '-d', 'sqlite', '--header-row', '1',
+                            '-o', str(out), '--no-copy-clipboard'])
+        self.assertEqual(code, EXIT_UNCLEAN)
+        self.assertIn('为空', err)
+        self.assertIn('列名已清洗', err)
+
+        sql, _ = self._product([['订单编号', '\u200b', '\ufeff'], ['A001', 2, 3]],
+                               name='inv2.xlsx', force=True)
+        cols, _ = self._load(sql)
+        self.assertEqual(cols, ['订单编号', 'col_2', 'col_3'])
+
+    def test_duplicate_report_does_not_list_blank_names(self):
+        """`列名重复：` 后面不该是空的 —— 空列名已由"列为空"报出，别在这里复述。"""
+        v = headers.check(['a', None, None], [[1, 2, 3]])
+        self.assertFalse(v.ok)
+        joined = '；'.join(v.issues)
+        self.assertIn('为空', joined)
+        self.assertNotIn('列名重复', joined)
+
+    def test_real_duplicates_are_still_reported(self):
+        v = headers.check(['a', 'a', 'b'], [[1, 2, 3]])
+        self.assertIn('列名重复', '；'.join(v.issues))
+
+    def test_whitespace_around_name_is_trimmed(self):
+        sql, _ = self._product([[' 订单编号 ', '数量\u00a0(件)'], ['A001', 2]])
+        cols, _ = self._load(sql)
+        self.assertEqual(cols, ['订单编号', '数量 (件)'])
+
+    def test_cleaning_is_reported_to_the_user(self):
+        """清洗必须看得见：静默修正和静默走偏只差一步。"""
+        _, err = self._product([['订\n单', '数量'], ['A001', 2]])
+        self.assertIn('列名已清洗', err)
+        self.assertIn('订 单', err)
+
+    def test_data_newlines_are_still_preserved(self):
+        """★ 硬边界：数据格里的换行是**合法多行文本**，绝不能被清洗掉。"""
+        sql, _ = self._product([['订单编号', '地址'], ['A001', '上海市\n浦东新区']])
+        _, conn = self._load(sql)
+        got = conn.execute('SELECT "地址" FROM loaded').fetchone()[0]
+        self.assertEqual(got, '上海市\n浦东新区')
+
+    def test_clean_header_is_untouched_and_not_reported(self):
+        """干净的表头一个字节都不改，也不打扰用户。"""
+        sql, err = self._product([['订单编号', '数量'], ['A001', 2]])
+        self.assertIn('AS "订单编号"', sql)
+        self.assertNotIn('列名已清洗', err)
 
 
 class TestCoerceNumericColumns(unittest.TestCase):
