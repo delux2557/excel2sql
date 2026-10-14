@@ -32,8 +32,77 @@ AMBIGUOUS_MARGIN = 0.3
 SKIPPED_MAX_CELLS = 1
 
 
+# 「不可见但不属于空白」的字符：`strip()` 去不掉、肉眼也看不见。
+# 留着有两个后果（2026-10-14 实测）：
+#   1. 列名变成"看不见的名字"，产物里是 `[]`，谁也不知道那列叫什么；
+#   2. `is_blank()` 认不出它（`str.isspace()` 对它们返回 False），于是 `col_N`
+#      补名逻辑不触发 —— 一个"看着没名字"的列表头其实被当成了正常列名。
+# 这类字符在任何语言里都不是列名该有的内容，直接删除。
+_INVISIBLE = (
+    '\u00ad'                                        # 软连字符
+    '\u200b\u200c\u200d\u2060'                      # 零宽空格 / 零宽不连字 / 零宽连字 / 词连接符
+    '\u200e\u200f\u202a\u202b\u202c\u202d\u202e'    # 方向标记与方向嵌入（不可见，且会扰乱显示顺序）
+    '\u3164'                                        # 谚文填充符（常被当空格用，但 isspace() 不认）
+    '\ufeff'                                        # BOM / 零宽不换行空格
+)
+_DELETE = dict.fromkeys(map(ord, _INVISIBLE))
+# C0/C1 控制字符里**不是空白**的那些（NUL、BEL、DEL…）同样删掉；
+# 是空白的（\t \n \v \f \r、NEL）留给 split() 折叠成空格 —— 它们表示"这里原本有分隔"。
+# ★ 变体选择符 U+FE0E/U+FE0F 与 emoji 序列不在删除范围内：它们修饰的是前面那个字符的
+#   呈现方式，属于**有意的内容**，删掉会把 🗃️ 变成单色字形。
+_DELETE.update(dict.fromkeys(
+    c for c in list(range(0x00, 0x20)) + list(range(0x7f, 0xa0)) if not chr(c).isspace()))
+
+
+def clean_name(v) -> str:
+    """把列名里的不可见噪声归一：删掉零宽/控制字符，再把任意空白折叠成单个空格。
+
+    为什么是"单空格"而不是"直接删掉"（2026-10-14 定）：
+    换行往往表示"这里原本有个分隔"，`订\\n单` 保留成 `订 单` 比粘成 `订单` 更保守；
+    列名带空格在 SQL 里完全合法（工具本来就会按方言加引号）。
+
+    只用于**表头/列名**。数据格里的换行是合法的多行文本，必须原样保留
+    （有 `CHAR(10)` 拼接机制专门支持），绝不能走到这里来。
+    """
+    if v is None:
+        return ''
+    s = str(v).translate(_DELETE)
+    return ' '.join(s.split())          # 任意空白 -> 单空格，顺带去掉首尾
+
+
+def changed_names(raw: Sequence[object], cleaned: Sequence[object],
+                  limit: int = 5) -> List[str]:
+    """列出被清洗过的列名，形如 `[第2列] '订\\n单' → '订 单'`（供调用方提示用户）。
+
+    ★ 清洗必须"看得见"：静默修正和静默走偏只差一步 —— 用户有权知道自己的表头被改过。
+
+    比较的是「原始文本」与「清洗结果」，不能用 clean_name 两边都洗一遍再比
+    （那样恒相等，等于什么都没比出来）。
+    """
+    pairs = []
+    for i, (a, b) in enumerate(zip(raw, cleaned)):
+        original = '' if a is None else str(a)
+        if original == str(b):
+            continue
+        pairs.append('[第{}列] {!r} → {!r}'.format(i + 1, a, b))
+
+    if len(pairs) <= limit:
+        return pairs
+    return pairs[:limit] + ['…（另有 {} 处）'.format(len(pairs) - limit)]
+
+
 def is_blank(v) -> bool:
-    return v is None or (isinstance(v, str) and v.strip() == '')
+    """单元格是否为空。
+
+    ★ 用 `clean_name()` 判空而不是 `str.strip()`：零宽字符、BOM 这类"看不见"的内容
+      在 `strip()` 眼里是非空的，于是它们会被当成**有名字的列**，
+      既得不到 `col_N` 补名，也不会被当成空列报出来（2026-10-14 实测）。
+    """
+    if v is None:
+        return True
+    if isinstance(v, str):
+        return clean_name(v) == ''
+    return False
 
 
 def looks_like_value(v) -> bool:
@@ -60,7 +129,7 @@ def repair(names: Sequence[object]) -> List[str]:
     out: List[str] = []
     seen = set()
     for i, raw in enumerate(names):
-        base = str(raw).strip() if raw is not None else ''
+        base = clean_name(raw)
         if not base:
             base = 'col_{}'.format(i + 1)
         name = base
@@ -166,7 +235,9 @@ def check(names: Sequence[object], data_rows: Sequence[Sequence[object]]) -> Hea
     seen = set()
     dup = []
     for i, h in enumerate(names):
-        k = str(h).strip().lower()
+        k = clean_name(h).lower()
+        if not k:
+            continue                    # 空列名已由上面的"列为空"报出，别在这里复述
         if k in seen:
             dup.append(i)
         seen.add(k)

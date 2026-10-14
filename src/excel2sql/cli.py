@@ -21,7 +21,7 @@ from .config import load as load_settings
 from .dialects import DIALECTS, UnknownDialect, resolve
 from .dialects import ORDER as DIALECT_ORDER
 from .headers import check as check_header
-from .headers import detect as detect_header, is_blank, repair
+from .headers import changed_names, clean_name, detect as detect_header, is_blank, repair
 from .reader import (ReadError, Sheet, has_type_info, probe_sheets,
                      read_sheet_rows, scan_dir)
 from .sqlgen import SqlGenError, SqlOptions, UNION_ROW_WARN, build_sql, write_sql
@@ -142,22 +142,45 @@ def _column_all_blank(rows: Sequence[Sequence[object]], idx: int) -> bool:
 
 
 def split_header(sheet: Sheet, row_index: int) -> Tuple[Optional[List], List[List]]:
-    """按 1 基行号切出表头与数据，并裁掉右侧多余空列。
+    """按 1 基行号切出表头与数据，**清洗列名**，并裁掉右侧多余空列。
 
     ★ 只裁「表头为空 **且** 该列数据全空」的尾列。
       旧实现只看表头是否为空 —— 于是"表头留空、下面却有数据"的尾列被**整列丢掉**
       （连数据一起，且不告警、退出码 0）。2026-09-25 实测确认。
       表头空但有数据的列必须保留，列名交由 check()/repair() 补成 col_N。
+
+    ★ 列名清洗放在这里，是因为本函数是**唯一**的表头切分入口 ——
+      清洗原先只发生在 repair() 里，而 repair() 只在"表不规范"时才被调用，
+      于是"看起来规范、只是列名带换行"的表头会绕过所有清洗直接进产物
+      （2026-10-14 实测：产物头注释被劈开、SQL 直接 syntax error）。
+      放在这里，非交互与交互两条路径都覆盖，且不依赖"有没有走到 repair"。
+
+    ★ 只清洗表头，**不碰数据**：数据格里的换行是合法的多行文本。
     """
     if row_index < 1 or row_index > sheet.nrows:
         return None, []
     bottom = [list(r) for r in sheet.rows[row_index:]]
-    header = list(sheet.rows[row_index - 1])
+    header = [clean_name(v) for v in sheet.rows[row_index - 1]]
     while len(header) > 1 and is_blank(header[-1]) \
             and _column_all_blank(bottom, len(header) - 1):
         header.pop()
     rows = [list(r[:len(header)]) for r in bottom]
     return header, rows
+
+
+def report_header_cleaning(sheet: Sheet, row_index: int, header: Sequence,
+                           file=None) -> None:
+    """把「哪些列名被清洗过」告诉用户。清洗必须看得见。
+
+    非交互模式走 stderr（与其余诊断信息一致，不污染 stdout 的 `[OK]` 摘要）。
+    """
+    if not header or row_index < 1 or row_index > sheet.nrows:
+        return
+    raw = list(sheet.rows[row_index - 1])
+    changes = changed_names(raw, header)
+    if changes:
+        print('列名已清洗（换行/制表符等空白折叠成单空格，零宽字符删除）：{}'
+              .format('；'.join(changes)), file=file)
 
 
 def _cells(text_row: Sequence, limit: int = 7, width: int = 14) -> str:
@@ -348,6 +371,7 @@ def interactive(args: argparse.Namespace, settings: Settings, config_path) -> in
         print('表头行 {} 超出范围（该表仅 {} 行），无法转换'.format(header_row, sheet.nrows))
         return EXIT_ERROR
 
+    report_header_cleaning(sheet, header_row, header, file=sys.stdout)
     verdict = check_header(header, rows)
     if verdict.ok:
         print('  表头校验通过：{} 列 / {} 行数据'.format(len(header), len(rows)))
@@ -485,6 +509,7 @@ def batch(args: argparse.Namespace, settings: Settings) -> int:
         print('表头行 {} 超出范围（该表仅 {} 行）'.format(header_row, sheet.nrows), file=sys.stderr)
         return EXIT_ERROR
 
+    report_header_cleaning(sheet, header_row, header, file=sys.stderr)
     verdict = check_header(header, rows)
     if not verdict.ok:
         print('[表格不规范] {}'.format('；'.join(verdict.issues)), file=sys.stderr)

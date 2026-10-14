@@ -266,14 +266,29 @@ def iter_sql(header: Sequence[object], rows: Sequence[Sequence[object]],
     return _render(header, data, force, opts)
 
 
+# 会"断行"的字符 -> 空格。★ 只换这些，**不能**用 `' '.join(s.split())`：
+# 那会把注释里**有意的**多空格（如 `方言：X   输出格式：Y`）一并折叠掉。
+_LINE_BREAK = dict.fromkeys(map(ord, '\r\n\v\f\t\x85\u2028\u2029'), ' ')
+
+
+def _comment(text: str) -> str:
+    """一行 `--` 注释（含结尾换行）。
+
+    ★ 必须压平换行：列名里带换行会**把注释劈成两行**，后半行失去 `--` 前缀、
+      被 SQL 引擎当成语句执行 —— 实测产物直接 `syntax error`（2026-10-14）。
+      这是库层的**兜底**：调用方（cli.split_header）理应已经清洗过列名。
+    """
+    return '-- ' + str(text).translate(_LINE_BREAK).rstrip() + '\n'
+
+
 def _header_comments(header: Sequence[object], data: Sequence[Sequence[object]],
                      force: Sequence[bool], opts: SqlOptions) -> Iterator[str]:
     """产物头注释。所有渲染器共用。"""
-    yield '-- 由 excel2sql 生成：{} 行 x {} 列\n'.format(len(data), len(header))
-    yield '-- 方言：{}   输出格式：{}\n'.format(opts.dialect.name, opts.fmt)
+    yield _comment('由 excel2sql 生成：{} 行 x {} 列'.format(len(data), len(header)))
+    yield _comment('方言：{}   输出格式：{}'.format(opts.dialect.name, opts.fmt))
     for reason, names in forced_groups(header, data, force, opts.all_string):
-        yield '-- 按字符串输出的列（{}）：{}\n'.format(reason, ', '.join(names))
-    yield '-- 提示：内联数据仅供测试/修数，请勿直接用于生产批量导入\n'
+        yield _comment('按字符串输出的列（{}）：{}'.format(reason, ', '.join(names)))
+    yield _comment('提示：内联数据仅供测试/修数，请勿直接用于生产批量导入')
 
 
 def _render_union(header: Sequence[object], data: Sequence[Sequence[object]],
